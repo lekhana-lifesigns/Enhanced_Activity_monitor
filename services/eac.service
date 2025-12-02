@@ -1,0 +1,29 @@
+[Unit]
+Description=Enhanced Activity Monitor - ICU Patient Monitoring System
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/Enhanced_Activity_monitor
+ExecStart=/opt/eac_venv/bin/python3 /home/pi/Enhanced_Activity_monitor/eac.py
+Restart=always
+RestartSec=5
+User=pi
+Group=pi
+
+# Environment variables
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/pi/Enhanced_Activity_monitor
+
+# Resource limits (optional, adjust as needed)
+# MemoryLimit=512M
+# CPUQuota=80%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eac
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+{
+  "pose": {
+    "average_keypoint_confidence": 0.9668388219969506,
+    "keypoint_confidence_std": 0.0034352580104389063,
+    "success_rate": 1.0,
+    "estimated_pose_accuracy": "85-95%",
+    "anatomical_plausibility": "True"
+  },
+  "features": {
+    "feature_extraction_rate": 1.0,
+    "total_features_extracted": 100,
+    "feature_means": [
+      0.0014271974796429276,
+      0.2865552604198456,
+      0.9917443990707397,
+      0.0012100484455004334,
+      0.0,
+      0.04944223910570145,
+      0.10139701515436172,
+      0.9832804203033447,
+      0.01018404122442007
+    ],
+    "feature_stds": [
+      0.007098380010575056,
+      0.9907779693603516,
+      0.009306400083005428,
+      0.0006159242475405335,
+      0.0,
+      0.022939547896385193,
+      0.238119438290596,
+      0.009391560219228268,
+      0.0078711723908782
+    ],
+    "feature_ranges_valid": true,
+    "scenarios_tested": [
+      "normal",
+      "agitated",
+      "falling",
+      "asymmetric"
+    ]
+  },
+  "clinical": {
+    "total_clinical_decisions": 48,
+    "scenario_accuracy": {
+      "normal": 0.0,
+      "agitated": 1.0,
+      "falling": 1.0,
+      "asymmetric": 1.0
+    },
+    "overall_accuracy": 0.75,
+    "alert_distribution": {
+      "normal": 12,
+      "agitated": 12,
+      "falling": 12,
+      "asymmetric": 12
+    },
+    "clinical_engine_functional": true
+  }
+}

@@ -1,0 +1,5 @@
+broker: "192.168.1.10"
+port: 1883
+topic_prefix: "hospital/ward1/bed"
+qos: 1
+compress_payload: true

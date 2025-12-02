@@ -1,0 +1,26 @@
+# Core packages for Raspberry Pi / Edge deployment
+numpy>=1.24.0
+opencv-python-headless>=4.7.0
+PyYAML>=6.0
+scipy>=1.11.0
+
+# MediaPipe (fallback for pose estimation)
+mediapipe>=0.10.1
+
+# TensorFlow Lite runtime (platform-specific)
+# For Raspberry Pi (ARM64/ARMv7):
+tflite-runtime; platform_machine=="aarch64" or platform_machine=="armv7l"
+# For Windows/development (fallback):
+tensorflow>=2.10.0; platform_machine!="aarch64" and platform_machine!="armv7l"
+
+# MQTT telemetry
+paho-mqtt>=1.6.1
+
+# System monitoring
+psutil>=5.9.0
+
+# Encryption (for sensitive data)
+cryptography>=41.0.0
+
+# Optional: Coral EdgeTPU support (install separately)
+# pycoral; platform_machine=="aarch64"

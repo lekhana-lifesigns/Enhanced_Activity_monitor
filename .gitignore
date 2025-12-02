@@ -1,0 +1,106 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+eac_venv/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+storage/*.db
+storage/events.db
+
+# Models (large files - uncomment if not tracking)
+# models/**/*.tflite
+# models/**/*.h5
+# models/**/*.pb
+
+# Data
+data/
+datasets/
+*.csv
+*.pkl
+*.pickle
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Error files
+*_Error.txt
+__*/
+
+# Compiled
+*.pyc
+*.pyo
+
+# Environment variables
+.env
+.env.local
+
+# Benchmark results
+benchmark_results.csv
+training_log.csv
+
+# System files
+*.pid
+*.sock
+
+# Documentation files (keep locally, not in repo)
+*.md
+README.md
+PROGRESS.md
+QUICK_START.md
+PRODUCTION_READY.md
+DEPLOYMENT_CHECKLIST.md
+INTEGRATION_COMPLETE.md
+INTEGRATION_SUMMARY.md
+ARCHITECTURE_COMPARISON.md
+ARCHITECTURE_REVIEW.md
+IMPLEMENTATION_COMPLETE.md
+IMPLEMENTATION_ROADMAP.md
+PHASE1_DEMO_SUMMARY.md
+PHASE2_PHASE3_ROADMAP.md
+PHASE2_READY.md
+REVIEW_SUMMARY.md
+

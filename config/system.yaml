@@ -1,0 +1,22 @@
+device_id: "bed_01"
+camera_idx: 0
+camera_resolution: [1280, 720]
+camera_fps: 15
+motion_sensitivity: 5
+
+use_edgetpu: false
+window_size: 48
+
+log_level: INFO
+heartbeat_interval: 5
+
+logging:
+  level: INFO
+  file: logs/inference.log
+
+models:
+  detector: "models/yolo11n.tflite"
+  det_input_size: [320, 320]
+  pose: "models/pose/movenet.tflite"
+  pose_input_size: 192
+  temporal: "models/temporal/gru.tflite"
