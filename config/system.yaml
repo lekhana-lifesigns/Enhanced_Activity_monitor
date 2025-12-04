@@ -3,6 +3,7 @@ camera_idx: 0
 camera_resolution: [1280, 720]
 camera_fps: 15
 motion_sensitivity: 5
+enable_display: true
 
 use_edgetpu: false
 window_size: 48
