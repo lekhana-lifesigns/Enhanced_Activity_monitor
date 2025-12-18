@@ -31,15 +31,66 @@ class MqttClient:
         self.topic = f"{cfg.get('topic_prefix')}/{device_id}"
         self.alert_topic = f"{cfg.get('topic_prefix')}/{device_id}/alerts"
         self.client = mqtt.Client(client_id=device_id)
-        self.client.connect(cfg.get("broker"), cfg.get("port", 1883))
-        self.client.loop_start()
+        self.connected = False
         self.use_compression = cfg.get("compress_payload", True)
+        
+        # Try to connect with timeout and retry
+        try:
+            broker = cfg.get("broker")
+            port = cfg.get("port", 1883)
+            timeout = cfg.get("connection_timeout", 5)
+            
+            log.info(f"Connecting to MQTT broker {broker}:{port}...")
+            self.client.connect(broker, port, keepalive=60)
+            self.client.loop_start()
+            
+            # Wait for connection with timeout
+            start_time = time.time()
+            while not self.connected and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+            
+            if self.connected:
+                log.info(f"MQTT client connected to {broker}:{port}")
+            else:
+                log.warning(f"MQTT connection timeout after {timeout}s - will retry on publish")
+        except Exception as e:
+            log.warning(f"MQTT client initialization failed: {e}")
+            self.connected = False
+        
+        # Set up connection callbacks
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+    
+    def _on_connect(self, client, userdata, flags, rc):
+        """Callback when MQTT client connects."""
+        if rc == 0:
+            self.connected = True
+            log.info("MQTT client connected successfully")
+        else:
+            self.connected = False
+            log.warning(f"MQTT connection failed with code {rc}")
+    
+    def _on_disconnect(self, client, userdata, rc):
+        """Callback when MQTT client disconnects."""
+        self.connected = False
+        if rc != 0:
+            log.warning(f"MQTT client disconnected unexpectedly (rc={rc})")
+        else:
+            log.info("MQTT client disconnected")
 
     def publish_event(self, payload):
         """
         Publish event payload (backward compatible).
         """
         try:
+            # Check connection and reconnect if needed
+            if not self.connected:
+                try:
+                    self.client.reconnect()
+                    time.sleep(0.1)  # Brief wait for connection
+                except:
+                    pass  # Will fail gracefully if broker unavailable
+            
             json_str = json.dumps(payload, separators=(',', ':'))
             if self.use_compression and len(json_str) > 500:
                 # Compress if payload is large
@@ -56,7 +107,7 @@ class MqttClient:
                     qos=self.cfg.get("qos", 1)
                 )
         except Exception:
-            log.exception("MQTT publish failed")
+            log.debug("MQTT publish failed (broker may be unavailable)")
 
     def publish_clinical_event(self, decision_result, features=None):
         """
@@ -67,7 +118,7 @@ class MqttClient:
             features: Optional feature vector
         """
         try:
-            # Build clinical payload
+            # Build clinical payload with patient tracking fields
             payload = {
                 "deviceId": self.device_id,
                 "ts": decision_result.get("ts", time.time()),
@@ -82,7 +133,13 @@ class MqttClient:
                 "breath_rate_proxy": decision_result.get("breath_rate_proxy", 0.0),
                 "motion_entropy": decision_result.get("motion_entropy", 0.0),
                 "alert": decision_result.get("alert", "LOW_RISK"),
-                "clinical_confidence": decision_result.get("clinical_confidence", 0.0)
+                "clinical_confidence": decision_result.get("clinical_confidence", 0.0),
+                # Patient tracking fields
+                "patientId": decision_result.get("patient_id"),
+                "posture_state": decision_result.get("posture_state", "unknown"),
+                "person_present": decision_result.get("person_present", True),
+                "policy_violation": decision_result.get("policy_violation", False),
+                "violation_type": decision_result.get("violation_type")
             }
             
             # Add features if available
@@ -136,6 +193,30 @@ class MqttClient:
             )
         except Exception:
             log.exception("MQTT heartbeat publish failed")
+
+    def publish_report(self, report_data, report_type="hourly"):
+        """
+        Publish report to cloud ingest layer.
+        
+        Args:
+            report_data: Report dictionary from ReportGenerator
+            report_type: "hourly" or "monthly"
+        """
+        try:
+            # Use reports topic for cloud ingest
+            report_topic = f"{self.cfg.get('topic_prefix')}/{self.device_id}/reports/{report_type}"
+            
+            # Compress report payload (reports can be large)
+            json_str = json.dumps(report_data, separators=(',', ':'))
+            if len(json_str) > 500:
+                compressed = compress_payload(report_data)
+                self.client.publish(report_topic, compressed, qos=self.cfg.get("qos", 1))
+            else:
+                self.client.publish(report_topic, json_str, qos=self.cfg.get("qos", 1))
+            
+            log.info("Published %s report to %s", report_type, report_topic)
+        except Exception:
+            log.exception("MQTT report publish failed")
 
     def shutdown(self):
         try:
