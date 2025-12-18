@@ -1,5 +1,6 @@
 # pipeline/detector.py
 import os, logging, cv2, numpy as np
+from ultralytics import YOLO
 log = logging.getLogger("detector")
 
 # -----------------------------------------
@@ -40,21 +41,39 @@ class Detector:
         # Load model if available
         # ----------------------------------------------------
         if model_path and os.path.exists(model_path) and TFLITE:
-            if self.use_edgetpu:
-                log.info("Loading EdgeTPU detector...")
-                self.interpreter = coral_make_interpreter(model_path)
-            else:
-                log.info("Loading TFLite detector...")
-                self.interpreter = TFLITE.Interpreter(model_path=model_path)
+            try:
+                # Check file size (corrupted files are often very small)
+                file_size = os.path.getsize(model_path)
+                if file_size < 1000:  # Less than 1KB is suspicious
+                    log.warning("Detector model file seems too small (%d bytes) - may be corrupted", file_size)
+                    raise ValueError("Model file too small")
+                
+                if self.use_edgetpu:
+                    log.info("Loading EdgeTPU detector...")
+                    self.interpreter = coral_make_interpreter(model_path)
+                else:
+                    log.info("Loading TFLite detector...")
+                    self.interpreter = TFLITE.Interpreter(model_path=model_path)
 
-            self.interpreter.allocate_tensors()
-            self.input_details = self.interpreter.get_input_details()
-            self.output_details = self.interpreter.get_output_details()
+                self.interpreter.allocate_tensors()
+                self.input_details = self.interpreter.get_input_details()
+                self.output_details = self.interpreter.get_output_details()
 
-            log.info("Detector loaded: %s (EdgeTPU=%s)",
-                     model_path, self.use_edgetpu)
-
+                log.info("Detector loaded: %s (EdgeTPU=%s)",
+                         model_path, self.use_edgetpu)
+            except Exception as e:
+                log.error("Failed to load detector model %s: %s", model_path, e)
+                log.warning("Detector will use fallback mode (full-frame detection)")
+                self.interpreter = None
+                self.input_details = None
+                self.output_details = None
         else:
+            if not model_path:
+                log.warning("No detector model path specified")
+            elif not os.path.exists(model_path):
+                log.warning("Detector model file not found: %s", model_path)
+            elif not TFLITE:
+                log.warning("TensorFlow Lite not available")
             log.warning("Detector model not loaded — detector disabled")
             self.input_details = None
             self.output_details = None
