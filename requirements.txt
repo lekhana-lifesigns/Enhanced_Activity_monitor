@@ -1,26 +1,33 @@
-# Core packages for Raspberry Pi / Edge deployment
-numpy>=1.24.0
-opencv-python-headless>=4.7.0
-PyYAML>=6.0
-scipy>=1.11.0
+# Core dependencies
+numpy>=1.21.0
+opencv-python>=4.5.0
+Pillow>=8.0.0
+pyyaml>=5.4.0
 
-# MediaPipe (fallback for pose estimation)
-mediapipe>=0.10.1
+# Deep learning
+torch>=1.9.0
+torchvision>=0.10.0
+ultralytics>=8.0.0
 
-# TensorFlow Lite runtime (platform-specific)
-# For Raspberry Pi (ARM64/ARMv7):
-tflite-runtime; platform_machine=="aarch64" or platform_machine=="armv7l"
-# For Windows/development (fallback):
-tensorflow>=2.10.0; platform_machine!="aarch64" and platform_machine!="armv7l"
+# Face recognition
+deepface>=0.0.79
 
 # MQTT telemetry
 paho-mqtt>=1.6.1
 
+# Database
+# SQLite3 is included with Python
+
+# Dashboard
+flask>=2.0.0
+flask-socketio>=5.0.0
+
 # System monitoring
-psutil>=5.9.0
+psutil>=5.8.0
 
-# Encryption (for sensitive data)
-cryptography>=41.0.0
+# Security
+cryptography>=3.4.8
 
-# Optional: Coral EdgeTPU support (install separately)
-# pycoral; platform_machine=="aarch64"
+# Data processing
+pandas>=1.3.0
+scipy>=1.7.0

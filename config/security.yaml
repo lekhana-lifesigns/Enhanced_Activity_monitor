@@ -1,0 +1,45 @@
+# config/security.yaml
+# Camera Security Configuration
+# Clinical-grade access control and audit logging
+
+# Authorized users (change passwords in production!)
+authorized_users:
+  admin:
+    password_hash: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"  # "admin123" - CHANGE IN PRODUCTION!
+    role: "admin"
+    permissions: ["read", "write", "admin"]
+  
+  nurse:
+    password_hash: "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"  # "password" - CHANGE IN PRODUCTION!
+    role: "nurse"
+    permissions: ["read", "write"]
+  
+  viewer:
+    password_hash: "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"  # "viewer123" - CHANGE IN PRODUCTION!
+    role: "viewer"
+    permissions: ["read"]
+
+# Session settings
+session:
+  max_age_seconds: 3600  # 1 hour
+  cleanup_interval_seconds: 300  # 5 minutes
+
+# Encryption settings
+encryption:
+  key_file: "storage/.encryption_key"
+  key_permissions: 0o600  # Read/write for owner only (Unix)
+
+# Audit logging
+audit:
+  log_path: "logs/security_audit.log"
+  log_rotation: true
+  max_log_size_mb: 100
+
+# Security policies
+policies:
+  require_authentication: true  # Require authentication for camera access
+  encrypt_frames: false  # Frame encryption (can impact performance)
+  log_all_access: true  # Log all resource access
+  lockout_after_failed_attempts: 5  # Lockout after N failed attempts
+  lockout_duration_seconds: 300  # 5 minutes
+
