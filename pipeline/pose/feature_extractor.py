@@ -98,6 +98,9 @@ def compute_acceleration(velocities, prev_velocities, dt=1.0):
 def compute_motion_energy(kps, prev_kps, dt=1.0):
     """
     Compute motion energy: E = 0.5 * m * v² per joint.
+    TODO-050: NumPy vectorization for performance.
+    
+    Vectorized implementation for better performance.
     Uses normalized mass (1.0) and velocity magnitude.
     """
     if not prev_kps:

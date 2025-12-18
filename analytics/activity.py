@@ -119,9 +119,30 @@ def classify_activity(kps, kps_history=None):
         }
     
     try:
+        # Check minimum keypoint confidence before proceeding
+        key_indices = [0, 5, 6, 11, 12, 15, 16]  # Nose, shoulders, hips, ankles
+        valid_keypoints = sum(1 for idx in key_indices 
+                            if idx < len(kps) and kps[idx][2] > MIN_CONFIDENCE)
+        
+        if valid_keypoints < 4:  # Need at least 4 of 7 critical keypoints
+            return {
+                "activity": "unknown",
+                "confidence": 0.0,
+                "details": {"reason": "insufficient_keypoints", "valid_count": valid_keypoints}
+            }
+        
         # Compute body metrics
         vertical_extent = compute_vertical_extent(kps)
         horizontal_extent = compute_horizontal_extent(kps)
+        
+        # Check if extents are valid (non-zero)
+        if vertical_extent < 1e-6 or horizontal_extent < 1e-6:
+            return {
+                "activity": "unknown",
+                "confidence": 0.0,
+                "details": {"reason": "invalid_extents"}
+            }
+        
         aspect_ratio = vertical_extent / (horizontal_extent + 1e-6)
         
         # Get key body points
@@ -204,14 +225,16 @@ def classify_activity(kps, kps_history=None):
                 }
             }
         
-        # Default: unknown
+        # Default: unknown (with confidence based on keypoint quality)
+        activity_confidence = compute_activity_confidence(kps)
         return {
             "activity": "unknown",
-            "confidence": 0.3,
+            "confidence": max(0.3, activity_confidence * 0.5),  # Use computed confidence
             "details": {
                 "aspect_ratio": aspect_ratio,
                 "knee_angle": avg_knee_angle,
-                "vertical_extent": vertical_extent
+                "vertical_extent": vertical_extent,
+                "keypoint_confidence": activity_confidence
             }
         }
         

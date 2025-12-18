@@ -97,7 +97,7 @@ def analyze_spine_curvature(kps):
 def compute_bed_angle(kps):
     """
     Compute angle relative to bed plane (for supine patients).
-    Assumes bed is horizontal.
+    Improved thresholds to reduce false positives.
     
     Returns:
         dict with:
@@ -117,6 +117,14 @@ def compute_bed_angle(kps):
         lhip = get_keypoint(kps, LEFT_HIP)
         rhip = get_keypoint(kps, RIGHT_HIP)
         
+        # Check confidence - need reliable keypoints
+        if (lshoulder[2] < MIN_CONFIDENCE or rshoulder[2] < MIN_CONFIDENCE or
+            lhip[2] < MIN_CONFIDENCE or rhip[2] < MIN_CONFIDENCE):
+            return {
+                "bed_angle": 0.0,
+                "orientation": "unknown"
+            }
+        
         shoulder_x = (lshoulder[0] + rshoulder[0]) / 2.0
         shoulder_y = (lshoulder[1] + rshoulder[1]) / 2.0
         hip_x = (lhip[0] + rhip[0]) / 2.0
@@ -126,22 +134,43 @@ def compute_bed_angle(kps):
         dx = hip_x - shoulder_x
         dy = hip_y - shoulder_y
         
-        # Angle from horizontal
-        angle = math.degrees(math.atan2(dy, dx))
-        abs_angle = abs(angle)
+        # Angle from horizontal (0 = horizontal, 90 = vertical)
+        angle_rad = math.atan2(abs(dy), abs(dx))
+        angle = math.degrees(angle_rad)
         
-        # Determine orientation
-        if abs_angle < 20.0:
-            orientation = "supine"  # Lying flat
-        elif abs_angle > 70.0:
-            orientation = "upright"  # Sitting/standing
-        elif 20.0 <= abs_angle <= 70.0:
-            orientation = "side"  # On side
+        # Compute vertical extent to distinguish lying vs sitting
+        # When lying, vertical extent is small; when sitting, it's large
+        nose = get_keypoint(kps, NOSE)
+        vertical_extent = abs(nose[1] - hip_y) if nose[2] > MIN_CONFIDENCE else 0.0
+        
+        # Improved thresholds with vertical extent check
+        # Supine: torso nearly horizontal AND low vertical extent
+        if angle < 25.0 and vertical_extent < 0.4:
+            orientation = "supine"
+        # Upright/sitting: torso nearly vertical AND high vertical extent
+        elif angle > 75.0 and vertical_extent > 0.3:
+            orientation = "upright"
+        # Side: intermediate angle OR low vertical extent (lying on side)
+        elif 25.0 <= angle <= 75.0 or vertical_extent < 0.35:
+            orientation = "side"
+        # Prone: similar to supine but check if face is visible (nose position relative to shoulders)
+        elif angle < 30.0 and vertical_extent < 0.4:
+            # Check if nose is below shoulders (prone indicator)
+            if nose[2] > MIN_CONFIDENCE and nose[1] > shoulder_y + 0.1:
+                orientation = "prone"
+            else:
+                orientation = "supine"
         else:
-            orientation = "unknown"
+            # Fallback: use angle only
+            if angle < 30.0:
+                orientation = "supine"
+            elif angle > 80.0:
+                orientation = "upright"
+            else:
+                orientation = "side"
         
         return {
-            "bed_angle": float(abs_angle),
+            "bed_angle": float(angle),
             "orientation": orientation
         }
         
@@ -245,19 +274,24 @@ def compute_posture_symmetry(kps):
         }
 
 
-def analyze_posture(kps):
+def analyze_posture(kps, features=None):
     """
     Comprehensive posture analysis.
     
+    Args:
+        kps: Keypoints
+        features: Optional feature vector (for extended analysis)
+    
     Returns:
-        dict with all posture metrics
+        dict with all posture metrics including posture_state
     """
     if not kps:
         return {
             "spine_curvature": {},
             "bed_angle": {},
             "symmetry": {},
-            "overall_score": 0.0
+            "overall_score": 0.0,
+            "posture_state": "unknown"
         }
     
     try:
@@ -272,11 +306,15 @@ def analyze_posture(kps):
             0.3 * (1.0 if bed["orientation"] != "unknown" else 0.5)
         )
         
+        # Classify discrete posture state
+        posture_state = classify_posture_state(kps)
+        
         return {
             "spine_curvature": spine,
             "bed_angle": bed,
             "symmetry": symmetry,
-            "overall_score": float(np.clip(overall_score, 0.0, 1.0))
+            "overall_score": float(np.clip(overall_score, 0.0, 1.0)),
+            "posture_state": posture_state
         }
         
     except Exception as e:
@@ -285,6 +323,99 @@ def analyze_posture(kps):
             "spine_curvature": {},
             "bed_angle": {},
             "symmetry": {},
-            "overall_score": 0.0
+            "overall_score": 0.0,
+            "posture_state": "unknown"
         }
+
+
+def classify_posture_state(kps, use_strict_thresholds=True):
+    """
+    Classify discrete posture state from keypoints.
+    Improved logic with stricter thresholds to reduce false positives.
+    
+    Args:
+        kps: Keypoints
+        use_strict_thresholds: Use stricter thresholds for better accuracy
+    
+    Returns:
+        str: One of "supine", "prone", "left_lateral", "right_lateral", "side", "sitting", "unknown"
+    """
+    if not kps or len(kps) < 13:
+        return "unknown"
+    
+    try:
+        # Check minimum keypoint confidence before proceeding
+        key_indices = [5, 6, 11, 12]  # Shoulders and hips (critical for posture)
+        valid_keypoints = sum(1 for idx in key_indices 
+                            if idx < len(kps) and kps[idx][2] > MIN_CONFIDENCE)
+        
+        if valid_keypoints < 3:  # Need at least 3 of 4 critical keypoints
+            return "unknown"
+        
+        bed_analysis = compute_bed_angle(kps)
+        symmetry_analysis = compute_posture_symmetry(kps)
+        
+        orientation = bed_analysis.get("orientation", "unknown")
+        asymmetry_type = symmetry_analysis.get("asymmetry_type", "none")
+        symmetry_index = symmetry_analysis.get("symmetry_index", 0.5)
+        bed_angle = bed_analysis.get("bed_angle", 0.0)
+        
+        # If orientation is unknown, return unknown
+        if orientation == "unknown":
+            return "unknown"
+        
+        # Map orientation + asymmetry to discrete states with improved logic
+        # Use stricter thresholds for better accuracy
+        if use_strict_thresholds:
+            if orientation == "supine":
+                # Verify it's truly supine (low angle, good symmetry)
+                if bed_angle < 25.0 and symmetry_index > 0.7:
+                    return "supine"
+                else:
+                    # Might be transitioning - return side
+                    return "side"
+            elif orientation == "prone":
+                # Prone: similar to supine but face down
+                if bed_angle < 25.0:
+                    return "prone"
+                else:
+                    return "side"
+            elif orientation == "upright":
+                # Only classify as sitting if we're very confident (high angle)
+                if bed_angle > 75.0:
+                    return "sitting"
+                else:
+                    # Likely false positive - return side
+                    return "side"
+            elif orientation == "side":
+                # Use asymmetry to determine left vs right lateral
+                # Require significant asymmetry (not just noise)
+                if asymmetry_type == "left" and symmetry_index < 0.85:
+                    return "left_lateral"
+                elif asymmetry_type == "right" and symmetry_index < 0.85:
+                    return "right_lateral"
+                else:
+                    # Generic side position (symmetric or unclear)
+                    return "side"
+            else:
+                return "unknown"
+        else:
+            # Less strict thresholds (for backward compatibility)
+            if orientation == "supine":
+                return "supine"
+            elif orientation == "upright":
+                return "sitting"
+            elif orientation == "side":
+                if asymmetry_type == "left":
+                    return "left_lateral"
+                elif asymmetry_type == "right":
+                    return "right_lateral"
+                else:
+                    return "side"
+            else:
+                return "unknown"
+            
+    except Exception as e:
+        log.exception("Error in posture state classification: %s", e)
+        return "unknown"
 
