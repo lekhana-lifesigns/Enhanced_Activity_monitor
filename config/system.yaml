@@ -6,7 +6,129 @@ motion_sensitivity: 5
 enable_display: true
 
 use_edgetpu: false
+device: "cpu"  # Options: "cpu", "cuda" (for GPU), "mps" (for Apple Silicon)
 window_size: 48
+
+# Performance optimization settings
+detector_type: "yolo"  # Options: "yolo" (working, has tracking), "hybrid" (requires valid TFLite model), "tflite" (requires valid TFLite model)
+use_reid_tracking: true  # Enable ReID-based tracking (two-stage: detection first, then detailed analysis)
+use_yolo_pose: true  # Use YOLO pose model for detailed pose estimation
+use_segmentation: true  # Enable instant segmentation masks (requires yolo11n-seg.pt or similar)
+yolo_detection_model: "yolo11n.pt"  # Fast detection model for bbox detection
+yolo_pose_model: "yolo11n-pose.pt"  # Detailed pose model: yolo11n-pose.pt (fastest), yolo11s-pose.pt (balanced), yolo11m-pose.pt (accurate)
+yolo_segmentation_model: "yolo11n-seg.pt"  # Segmentation model: yolo11n-seg.pt (fastest), yolo11s-seg.pt (balanced), yolo11m-seg.pt (accurate)
+tracker_type: "bytetrack.yaml"  # Tracker: "bytetrack.yaml" or "strongsort.yaml" (for ReID)
+detector_confidence: 0.5  # Higher = faster, fewer false positives (0.4-0.6 recommended)
+include_mask_in_result: false  # Include full mask in result (can be large, set to true for debugging)
+posture_smoothing_frames: 10  # Number of frames for posture smoothing (reduces false positives)
+posture_transition_threshold: 5  # Frames required for posture state transition (higher = more stable)
+use_face_recognition: true  # Enable DeepFace for patient verification
+face_model: "VGG-Face"  # DeepFace model: "VGG-Face", "Facenet", "ArcFace", "OpenFace"
+patient_faces_dir: "storage/patient_faces"  # Directory for reference face images
+patient_missing_threshold: 30  # Frames before patient considered missing (unverified)
+patient_missing_threshold_verified: 150  # Frames before verified patient considered missing (increased for better occlusion handling)
+enable_liveness_detection: true  # Enable liveness detection (anti-spoofing)
+enable_rate_limiting: true  # Enable rate limiting for face verification
+rate_limit_max_attempts: 5  # Maximum verification attempts per window
+rate_limit_window_seconds: 60  # Time window for rate limiting
+rate_limit_lockout_seconds: 300  # Lockout duration after exceeding limit
+
+# 3D Analysis Settings
+use_3d_analysis: true  # Enable 3D depth estimation for accurate posture classification
+depth_method: "geometric"  # "geometric" (fast, approximate) or "model" (accurate, slower)
+camera_intrinsics_path: "models/calibration/camera_intrinsics.json"  # Optional camera calibration file
+
+# Emotion Detection Settings
+use_emotion_detection: true  # Enable emotion detection for clinical correlation
+emotion_method: "deepface"  # "deepface" (accurate), "mediapipe" (fast), or "geometric" (fallback)
+
+# Enhanced Model Settings (Phase 1 & 2 improvements)
+use_enhanced_temporal: true  # Use enhanced temporal model with attention (Phase 1)
+use_learned_features: false  # Use learned features instead of handcrafted (Phase 2) - requires training
+learned_feature_method: "transformer"  # "transformer" (accurate) or "cnn" (fast)
+use_hybrid_features: true  # Combine learned + handcrafted features (best of both)
+use_3d_pose_estimation: true  # Upgrade 2D pose to 3D for better accuracy (Phase 2)
+pose3d_method: "kinematic"  # "kinematic" (forward kinematics, anatomically valid), "pose3dm" (97% accuracy, requires model), "pedrec" (94%, requires model), "geometric" (fast, basic)
+use_bone_constraints: true  # Enforce bone-length constraints for anatomically valid poses
+
+# Camera Security Settings
+enable_camera_security: true  # Enable camera security (access control, encryption, audit logging)
+camera_security:
+  config_path: "config/security.yaml"  # Security configuration file
+  audit_log_path: "logs/security_audit.log"  # Audit log file path
+  enable_encryption: true  # Enable frame encryption (requires cryptography package)
+
+# Bed Detection and Auto-Zoom Settings
+enable_bed_detection: true  # Enable bed detection for context-aware monitoring
+bed_detection_model: null  # Path to custom bed detection model (null = use default YOLO11n)
+bed_detection_confidence: 0.3  # Confidence threshold for bed detection
+enable_auto_zoom: true  # Enable automatic camera zoom for optimal framing
+auto_zoom_target_size: 0.4  # Target person size as fraction of frame (0.0-1.0) for auto-zoom
+
+# Distance Monitoring Settings
+enable_distance_monitoring: true  # Enable distance monitoring and patient feedback
+optimal_distance_target: 2.0  # Target distance in meters (200cm)
+optimal_distance_min: 1.5  # Minimum optimal distance in meters (150cm)
+optimal_distance_max: 3.0  # Maximum optimal distance in meters (300cm)
+too_close_threshold: 1.0  # Too close threshold in meters (100cm)
+too_far_threshold: 4.0  # Too far threshold in meters (400cm)
+
+# Keypoint Validation Settings
+enable_keypoint_validation: true  # Enable keypoint validation before processing
+keypoint_validation:
+  min_keypoints: 5  # Minimum valid keypoints required
+  min_confidence: 0.3  # Minimum confidence threshold
+  clamp_to_range: true  # Clamp values to [0, 1] range
+
+# Self-Contact Detection (SC3D) Settings (TODO-067)
+enable_self_contact_detection: true  # Enable SC3D self-contact detection
+self_contact:
+  model_path: null  # Path to SC3D model (null = use geometric)
+  geometric_threshold: 0.05  # Distance threshold for contact (meters)
+  use_temporal_smoothing: true  # Use temporal smoothing
+  validate_3d_pose: true  # Validate 3D pose for intersections
+  correct_intersections: true  # Auto-correct intersections
+
+# Keypoint Smoothing Settings
+keypoint_smoothing_alpha: 0.7  # EMA smoothing factor (0-1), higher = more weight to current
+enable_keypoint_smoothing: true  # Enable keypoint smoothing
+
+# Activity Smoothing Settings
+activity_transition_threshold: 8  # Frames required for activity state transition
+
+# Performance Optimization Settings
+enable_model_warmup: true  # Warmup models on startup (eliminates cold start latency)
+model_warmup_frames: 10  # Number of warmup frames
+enable_parallel_processing: false  # Enable parallel processing for independent operations (experimental)
+parallel_workers: 3  # Number of parallel workers
+use_multi_scale_pose: false  # Enable multi-scale pose estimation (better for varying person sizes, slower)
+
+# Display Optimization Settings (TODO-025)
+display_render_frequency: 1  # Render every N frames (1 = every frame, 2 = every other frame, etc.)
+disable_display_in_production: false  # Disable display in production for better performance
+
+# Frame Rate Control (TODO-030)
+enable_frame_rate_control: true  # Enable frame rate control to maintain target FPS
+# Note: target FPS is set by camera_fps above
+
+# Adaptive Frame Skipping (TODO-031)
+enable_adaptive_frame_skipping: true  # Skip frames when pose hasn't changed significantly
+pose_change_threshold: 0.05  # Pose change threshold (0-1), lower = more aggressive skipping
+
+# Detection Frame Skipping (TODO-001)
+enable_detection_frame_skipping: false  # Enable detection frame skipping (process every N frames)
+detection_frame_skip_interval: 2  # Process every N frames (2 = every other frame)
+
+# Activity Classification Caching (TODO-020)
+enable_activity_caching: true  # Cache activity results when pose hasn't changed significantly
+activity_cache_pose_threshold: 0.03  # Pose change threshold for cache invalidation (0-1)
+
+# Activity Classification Frequency (TODO-022)
+activity_classification_frequency: 1  # Run activity classification every N frames (1 = every frame, 2 = every other frame, etc.)
+
+# Pose Caching (TODO-008)
+enable_pose_caching: true  # Cache pose results for static poses (20-30% faster for static scenes)
+pose_cache_threshold: 0.03  # Pose change threshold for cache invalidation (0-1), lower = more aggressive caching
 
 log_level: INFO
 heartbeat_interval: 5
@@ -16,8 +138,18 @@ logging:
   file: logs/inference.log
 
 models:
-  detector: "models/yolo11n.tflite"
+  detector: "models/yolo/yolo11n.tflite"  # TFLite detector model (for hybrid/tflite modes)
   det_input_size: [320, 320]
   pose: "models/pose/movenet.tflite"
   pose_input_size: 192
   temporal: "models/temporal/gru.tflite"
+
+# Patient configuration (for ID-based monitoring)
+patient:
+  id: "patient_01"
+  # Allowed postures for this patient (for policy checks)
+  # Options: supine, prone, left_lateral, right_lateral, side, sitting
+  allowed_postures: ["supine", "left_lateral", "right_lateral"]
+  forbidden_postures: ["prone"]
+  # If true, leaving bed (person_present=false) is treated as policy violation
+  must_be_in_bed: true
