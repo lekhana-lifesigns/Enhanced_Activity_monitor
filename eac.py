@@ -59,21 +59,40 @@ last_monthly_report = None  # Will be set on first run
 
 running = True
 
-def stop(sig, frame):
-    global running
-    log.info("Received stop signal, shutting down...")
-    running = False
-
-signal.signal(signal.SIGINT, stop)
-signal.signal(signal.SIGTERM, stop)
-
 # Asynchronous processing for MQTT/database (TODO-032)
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import atexit
 
 # Thread pool for async operations
 executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="eac_async")
 executor_lock = threading.Lock()
+executor_shutdown = False
+
+def shutdown_executor():
+    """Safely shutdown executor on exit."""
+    global executor_shutdown, executor
+    if not executor_shutdown and executor:
+        try:
+            log.info("Shutting down async executor...")
+            executor.shutdown(wait=True, timeout=5.0)
+            executor_shutdown = True
+        except Exception as e:
+            log.warning("Error shutting down executor: %s", e)
+
+# Register shutdown handler for cleanup on exit
+atexit.register(shutdown_executor)
+
+def stop(sig, frame):
+    """Signal handler for graceful shutdown."""
+    global running, executor_shutdown
+    log.info("Received stop signal (sig=%d), shutting down...", sig)
+    running = False
+    # Ensure executor is shut down on signal
+    shutdown_executor()
+
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
 
 def publish_fn(res):
     """Publish result to MQTT and store locally (synchronous version)."""
@@ -199,8 +218,20 @@ if __name__ == "__main__":
             frame_count += 1
             
             # Asynchronous publishing (TODO-032: Non-blocking MQTT/database)
-            if res:
-                executor.submit(publish_fn, res)  # Non-blocking
+            # Add backpressure: check queue size to prevent unbounded growth
+            if res and not executor_shutdown:
+                try:
+                    # Check if executor is still running
+                    if executor and not executor._shutdown:
+                        executor.submit(publish_fn, res)  # Non-blocking
+                    else:
+                        # Executor is shutting down, publish synchronously
+                        log.warning("Executor shutting down, publishing synchronously")
+                        publish_fn(res)
+                except RuntimeError as e:
+                    # Executor is closed, fallback to synchronous
+                    log.warning("Executor closed, publishing synchronously: %s", e)
+                    publish_fn(res)
             
             current_time = time.time()
             
@@ -257,9 +288,8 @@ if __name__ == "__main__":
     log.info("Total frames processed: %d", frame_count)
     log.info("=" * 60)
     
-    # Shutdown async executor
-    log.info("Shutting down async executor...")
-    executor.shutdown(wait=True, timeout=5.0)
+    # Shutdown async executor (atexit will also handle this, but explicit is better)
+    shutdown_executor()
     
     if MQ:
         MQ.shutdown()

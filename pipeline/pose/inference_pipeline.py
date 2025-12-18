@@ -2,6 +2,7 @@
 import time
 import logging
 import numpy as np
+import hashlib
 from .camera import Camera
 from pipeline.detectors.detector import Detector
 from .pose_estimator import PoseEstimator
@@ -165,6 +166,8 @@ class InferencePipeline:
         self.pose_cache_threshold = cfg.get("pose_cache_threshold", 0.03)  # 3% pose change to invalidate cache
         self.last_cached_pose = None
         self.last_cached_pose_hash = None
+        # Number of bytes to hash for pose cache (balance between speed and collision risk)
+        self.pose_cache_hash_bytes = 1000
         
         # Performance monitoring (optional)
         self.enable_metrics = cfg.get("enable_metrics_collection", False)
@@ -571,18 +574,14 @@ class InferencePipeline:
             # TODO-008: Cache pose results for static poses
             kps = None
             if self.enable_pose_caching and self.last_cached_pose is not None:
-                # Compute pose change from previous frame
-                # Use a simple hash of the crop to detect if it's the same/similar
+                # Check if crop is identical using MD5 hash (more reliable than Python hash)
                 try:
-                    crop_hash = hash(crop.tobytes()[:1000])  # Hash first 1000 bytes (fast approximation)
+                    crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
+                    crop_hash = hashlib.md5(crop_bytes).hexdigest()
                     if crop_hash == self.last_cached_pose_hash:
                         # Crop is identical, reuse cached pose
                         kps = self.last_cached_pose
                         log.debug("Using cached pose (static crop)")
-                    elif self.last_processed_kps is not None:
-                        # Check if pose has changed significantly using previous keypoints
-                        # This will be computed after we get the pose, so we'll check after inference
-                        pass
                 except Exception as e:
                     log.debug("Pose cache check failed: %s", e)
             
@@ -600,7 +599,8 @@ class InferencePipeline:
                         # Pose hasn't changed significantly, cache it
                         self.last_cached_pose = kps
                         try:
-                            self.last_cached_pose_hash = hash(crop.tobytes()[:1000])
+                            crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
+                            self.last_cached_pose_hash = hashlib.md5(crop_bytes).hexdigest()
                         except Exception:
                             self.last_cached_pose_hash = None
                         log.debug("Cached pose (change: %.4f < %.4f)", pose_change, self.pose_cache_threshold)
@@ -612,7 +612,8 @@ class InferencePipeline:
                     # First frame or caching disabled, cache the pose
                     self.last_cached_pose = kps
                     try:
-                        self.last_cached_pose_hash = hash(crop.tobytes()[:1000])
+                        crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
+                        self.last_cached_pose_hash = hashlib.md5(crop_bytes).hexdigest()
                     except Exception:
                         self.last_cached_pose_hash = None
             
