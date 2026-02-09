@@ -127,8 +127,8 @@ class CameraSecurity:
                 # Set restrictive permissions (Unix only)
                 try:
                     os.chmod(key_file, 0o600)
-                except:
-                    pass
+                except OSError:
+                    pass  # Windows doesn't support chmod
             
             self.encryption_key = key
             self.cipher = Fernet(key)

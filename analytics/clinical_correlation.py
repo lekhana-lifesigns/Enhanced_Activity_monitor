@@ -26,16 +26,17 @@ class ClinicalCorrelationEngine:
         self.dizziness_history = []
         self.history_size = 30  # ~2 seconds at 15 FPS
     
-    def correlate_clinical_state(self, 
+    def correlate_clinical_state(self,
                                 posture_state: str,
                                 posture_3d: Optional[List[Tuple[float, float, float, float]]],
                                 emotions: Dict,
                                 movement_features: Optional[Dict],
                                 frame_visibility: Dict,
-                                distance: float) -> Dict:
+                                distance: float,
+                                self_contact: Optional[Dict] = None) -> Dict:
         """
         Correlate multiple signals to determine clinical state.
-        
+
         Args:
             posture_state: Current posture (supine, prone, lateral, etc.)
             posture_3d: 3D keypoints (x, y, z, confidence)
@@ -43,7 +44,8 @@ class ClinicalCorrelationEngine:
             movement_features: Movement features (motion energy, jerk, etc.)
             frame_visibility: Frame visibility analysis
             distance: Distance from camera (meters)
-        
+            self_contact: SC3D self-contact signature (face_touch, arm_cross, etc.)
+
         Returns:
             dict with:
             - pain_score: 0-1 pain level
@@ -62,13 +64,13 @@ class ClinicalCorrelationEngine:
             
             # 1. PAIN DETECTION
             pain_score, pain_indicators = self._assess_pain(
-                posture_state, posture_3d, emotions, movement_features
+                posture_state, posture_3d, emotions, movement_features, self_contact
             )
             indicators.extend(pain_indicators)
-            
+
             # 2. AGITATION DETECTION
             agitation_score, agitation_indicators = self._assess_agitation(
-                posture_state, emotions, movement_features, frame_visibility
+                posture_state, emotions, movement_features, frame_visibility, self_contact
             )
             indicators.extend(agitation_indicators)
             
@@ -137,25 +139,24 @@ class ClinicalCorrelationEngine:
                 "completeness": 0.0
             }
     
-    def _assess_pain(self, posture_state, posture_3d, emotions, movement_features) -> Tuple[float, List[str]]:
+    def _assess_pain(self, posture_state, posture_3d, emotions, movement_features,
+                     self_contact=None) -> Tuple[float, List[str]]:
         """Assess pain level from multiple signals."""
         pain_score = 0.0
         indicators = []
-        
+
         # Pain indicators from posture
         if posture_state in ["prone", "side"]:
-            # Uncomfortable postures may indicate pain
             pain_score += 0.2
             indicators.append("uncomfortable_posture")
-        
+
         # Pain indicators from emotions
         if emotions:
             dominant = emotions.get("dominant_emotion", "neutral")
             if dominant in ["sad", "angry", "fear"]:
                 pain_score += 0.3
                 indicators.append(f"negative_emotion_{dominant}")
-            
-            # High negative emotion scores
+
             negative_emotions = emotions.get("emotions", {})
             if negative_emotions:
                 negative_sum = sum([
@@ -167,70 +168,89 @@ class ClinicalCorrelationEngine:
                 if negative_sum > 0.5:
                     pain_score += 0.2
                     indicators.append("high_negative_emotions")
-        
+
         # Pain indicators from movement
         if movement_features:
-            # Restricted movement may indicate pain
             motion_energy = movement_features.get("motion_energy", 0.0)
             if motion_energy < 0.1:
                 pain_score += 0.1
                 indicators.append("restricted_movement")
-            
-            # Guarding behavior (protecting painful area)
-            # This would need more sophisticated analysis
-        
+
+        # Pain indicators from self-contact (SC3D guarding behavior)
+        if self_contact:
+            face_touch = self_contact.get("face_touch", False)
+            arm_cross = self_contact.get("arm_cross", False)
+            body_hold = self_contact.get("body_hold", False)
+
+            if face_touch:
+                pain_score += 0.15
+                indicators.append("face_touch_pain_indicator")
+            if arm_cross or body_hold:
+                pain_score += 0.2
+                indicators.append("guarding_behavior")
+
         # Pain indicators from 3D posture
         if posture_3d:
-            # Asymmetric posture may indicate pain
-            pain_score += self._check_posture_asymmetry(posture_3d) * 0.2
-            if self._check_posture_asymmetry(posture_3d) > 0.5:
+            asymmetry = self._check_posture_asymmetry(posture_3d)
+            pain_score += asymmetry * 0.2
+            if asymmetry > 0.5:
                 indicators.append("asymmetric_posture")
-        
+
         return min(1.0, pain_score), indicators
     
-    def _assess_agitation(self, posture_state, emotions, movement_features, frame_visibility) -> Tuple[float, List[str]]:
+    def _assess_agitation(self, posture_state, emotions, movement_features, frame_visibility,
+                          self_contact=None) -> Tuple[float, List[str]]:
         """Assess agitation level."""
         agitation_score = 0.0
         indicators = []
-        
+
         # Agitation from movement
         if movement_features:
             motion_energy = movement_features.get("motion_energy", 0.0)
             jerk_index = movement_features.get("jerk_index", 0.0)
-            
-            # High, erratic movement indicates agitation
+
             if motion_energy > 0.7:
                 agitation_score += 0.3
                 indicators.append("high_movement")
-            
+
             if jerk_index > 0.6:
                 agitation_score += 0.3
                 indicators.append("erratic_movement")
-        
+
         # Agitation from emotions
         if emotions:
             dominant = emotions.get("dominant_emotion", "neutral")
             if dominant == "angry":
                 agitation_score += 0.4
                 indicators.append("angry_expression")
-            
+
             if dominant == "fear":
                 agitation_score += 0.3
                 indicators.append("fearful_expression")
-        
+
         # Agitation from posture
         if posture_state == "sitting":
-            # Restless sitting may indicate agitation
             if movement_features and movement_features.get("motion_energy", 0.0) > 0.5:
                 agitation_score += 0.2
                 indicators.append("restless_sitting")
-        
+
+        # Agitation from self-contact (SC3D repetitive face-touching)
+        if self_contact:
+            face_touch = self_contact.get("face_touch", False)
+            contact_freq = self_contact.get("contact_frequency", 0.0)
+
+            if face_touch and contact_freq > 0.3:
+                agitation_score += 0.25
+                indicators.append("repetitive_face_touching")
+            elif face_touch:
+                agitation_score += 0.1
+                indicators.append("face_touching")
+
         # Agitation from frame visibility (frequent position changes)
         if frame_visibility.get("completeness_score", 1.0) < 0.7:
-            # Partial visibility may indicate frequent movement
             agitation_score += 0.1
             indicators.append("frequent_position_changes")
-        
+
         return min(1.0, agitation_score), indicators
     
     def _assess_dizziness(self, posture_state, posture_3d, emotions, movement_features, distance) -> Tuple[float, List[str]]:

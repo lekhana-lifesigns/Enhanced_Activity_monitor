@@ -47,7 +47,7 @@ class Camera:
             if zoom >= 0:
                 log.info("Camera supports optical zoom (current: %.2f)", zoom)
                 return True
-        except:
+        except Exception:
             pass
         return False
 
@@ -310,5 +310,5 @@ class Camera:
         try:
             if self.cap.isOpened():
                 self.cap.release()
-        except:
+        except Exception:
             pass

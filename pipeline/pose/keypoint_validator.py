@@ -171,7 +171,7 @@ class KeypointValidator:
                 else:
                     valid_count += 1
                     confidences.append(conf)
-            except:
+            except (TypeError, IndexError, ValueError):
                 invalid_count += 1
         
         total = len(kps)

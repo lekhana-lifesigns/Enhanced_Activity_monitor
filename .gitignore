@@ -22,6 +22,9 @@ eac_venv/
 *.swo
 *~
 
+# Claude Code
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -74,9 +77,61 @@ __*/
 *.pyc
 *.pyo
 
-# Environment variables
+# Environment variables (CRITICAL - NEVER COMMIT)
 .env
 .env.local
+.env.production
+.env.development
+*.env
+
+# =============================================================================
+# SECURITY-CRITICAL - NEVER COMMIT THESE FILES
+# =============================================================================
+
+# Encryption keys
+*.key
+*.pem
+storage/.encryption_key
+storage/encryption_key
+**/.encryption_key
+
+# TLS/SSL Certificates (private keys)
+certs/
+*.crt
+*.cert
+**/*.key
+
+# Patient data (PHI/PII - HIPAA)
+storage/patient_faces/
+patient_faces/
+**/patient_*.jpg
+**/patient_*.png
+**/face_*.jpg
+**/face_*.png
+
+# Clinical validation data (may contain PHI)
+clinical_validation_data/
+validation_data/
+
+# Audit logs (may contain sensitive information)
+logs/audit.log
+logs/security_audit.log
+**/audit*.log
+
+# API keys and secrets
+*.secret
+api_keys.json
+secrets.json
+credentials.json
+
+# Pilot learning data (may contain patient patterns)
+storage/pilot_learning.json
+
+# Database files (contain patient data)
+storage/*.db
+storage/*.sqlite
+**/*.db-journal
+**/*.db-wal
 
 # Benchmark results
 benchmark_results.csv
@@ -86,7 +141,27 @@ training_log.csv
 *.pid
 *.sock
 
+# TensorRT engines (device-specific, must be generated per Jetson)
+models/tensorrt/*.engine
+models/tensorrt/*.trt
+*.engine
+*.trt
+
+# YOLO model weights (download separately)
+yolo11n.pt
+yolo11n-pose.pt
+yolo11n-seg.pt
+*.onnx
+
+# Deployment artifacts
+venv/
+
 # Documentation files (keep locally, not in repo)
+training/
+training_data/
+validation_data/
+clinical_validation_data/
+docs/
 *.md
 README.md
 PROGRESS.md

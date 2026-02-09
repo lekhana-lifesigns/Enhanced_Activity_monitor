@@ -3,98 +3,17 @@
 # Classifies patient activity: sitting, standing, lying, walking
 
 import numpy as np
-import math
 import logging
 
+from analytics.keypoint_utils import (
+    NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP,
+    LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE,
+    MIN_CONFIDENCE, get_keypoint, compute_vertical_extent,
+    compute_horizontal_extent_full as compute_horizontal_extent,
+    compute_knee_angle,
+)
+
 log = logging.getLogger("activity")
-
-# Keypoint indices (MoveNet/COCO)
-NOSE = 0
-LEFT_SHOULDER = 5
-RIGHT_SHOULDER = 6
-LEFT_HIP = 11
-RIGHT_HIP = 12
-LEFT_KNEE = 13
-RIGHT_KNEE = 14
-LEFT_ANKLE = 15
-RIGHT_ANKLE = 16
-
-MIN_CONFIDENCE = 0.3
-
-
-def get_keypoint(kps, idx, default=(0.0, 0.0, 0.0)):
-    """Safely get keypoint with confidence check."""
-    if idx < len(kps) and kps[idx][2] > MIN_CONFIDENCE:
-        return kps[idx]
-    return default
-
-
-def compute_vertical_extent(kps):
-    """Compute vertical extent of body (head to feet)."""
-    try:
-        nose = get_keypoint(kps, NOSE)
-        lankle = get_keypoint(kps, LEFT_ANKLE)
-        rankle = get_keypoint(kps, RIGHT_ANKLE)
-        
-        top_y = nose[1]
-        bottom_y = max(lankle[1], rankle[1])
-        
-        return abs(bottom_y - top_y)
-    except Exception:
-        return 0.0
-
-
-def compute_horizontal_extent(kps):
-    """Compute horizontal extent of body."""
-    try:
-        lshoulder = get_keypoint(kps, LEFT_SHOULDER)
-        rshoulder = get_keypoint(kps, RIGHT_SHOULDER)
-        lhip = get_keypoint(kps, LEFT_HIP)
-        rhip = get_keypoint(kps, RIGHT_HIP)
-        
-        left_x = min(lshoulder[0], lhip[0])
-        right_x = max(rshoulder[0], rhip[0])
-        
-        return abs(right_x - left_x)
-    except Exception:
-        return 0.0
-
-
-def compute_knee_angle(kps, side='left'):
-    """Compute knee angle (for walking detection)."""
-    try:
-        if side == 'left':
-            hip = get_keypoint(kps, LEFT_HIP)
-            knee = get_keypoint(kps, LEFT_KNEE)
-            ankle = get_keypoint(kps, LEFT_ANKLE)
-        else:
-            hip = get_keypoint(kps, RIGHT_HIP)
-            knee = get_keypoint(kps, RIGHT_KNEE)
-            ankle = get_keypoint(kps, RIGHT_ANKLE)
-        
-        # Vector from hip to knee
-        v1_x = knee[0] - hip[0]
-        v1_y = knee[1] - hip[1]
-        
-        # Vector from knee to ankle
-        v2_x = ankle[0] - knee[0]
-        v2_y = ankle[1] - knee[1]
-        
-        # Angle between vectors
-        dot = v1_x * v2_x + v1_y * v2_y
-        mag1 = math.sqrt(v1_x * v1_x + v1_y * v1_y)
-        mag2 = math.sqrt(v2_x * v2_x + v2_y * v2_y)
-        
-        if mag1 < 1e-6 or mag2 < 1e-6:
-            return 180.0
-        
-        cos_angle = dot / (mag1 * mag2)
-        cos_angle = np.clip(cos_angle, -1.0, 1.0)
-        angle = math.degrees(math.acos(cos_angle))
-        
-        return angle
-    except Exception:
-        return 180.0
 
 
 def classify_activity(kps, kps_history=None):

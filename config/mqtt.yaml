@@ -3,3 +3,30 @@ port: 1883
 topic_prefix: "hospital/ward1/bed"
 qos: 1
 compress_payload: true
+
+# Authentication (use env vars EAM_MQTT_USERNAME / EAM_MQTT_PASSWORD for credentials)
+# username and password are read from environment by mqtt_client.py
+use_authentication: true
+
+# TLS/SSL Configuration (enable for production)
+# Set use_tls: true and provide certificate paths for encrypted MQTT
+use_tls: false  # Set to true for production deployment
+tls:
+  ca_cert: null      # Path to CA certificate (e.g., /opt/eam/certs/ca.crt)
+  client_cert: null   # Path to client certificate (optional, for mutual TLS)
+  client_key: null    # Path to client private key (optional, for mutual TLS)
+  tls_version: "tlsv1.2"  # Minimum TLS version
+
+# MQTT Broker Message Retention (server-side settings)
+# Note: These settings must be configured on the MQTT broker itself
+# This section documents the expected broker configuration
+broker_retention:
+  # Session persistence for durable subscriptions
+  persistent_session: true
+  # Message retention (in seconds) - set to 0 for no retention, -1 for unlimited
+  # Recommended: 86400 seconds (24 hours) for real-time clinical data
+  message_retention_seconds: 86400
+  # Maximum queue size per client (prevents memory overflow)
+  max_queued_messages: 1000
+  # Clean session on disconnect (false = keep subscriptions/messages)
+  clean_session: false

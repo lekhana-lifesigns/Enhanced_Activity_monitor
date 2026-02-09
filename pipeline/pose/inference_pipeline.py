@@ -3,6 +3,7 @@ import time
 import logging
 import numpy as np
 import hashlib
+from datetime import datetime
 from .camera import Camera
 from pipeline.detectors.detector import Detector
 from .pose_estimator import PoseEstimator
@@ -81,6 +82,9 @@ class InferencePipeline:
         
         self.pose = PoseEstimator(model_path=models.get("pose"), input_size=models.get("pose_input_size", 192))
         
+        # Shared window size (used by temporal model, feature encoder, keypoint buffer)
+        window_size = cfg.get("window_size", 48)
+
         # Use enhanced temporal model if available
         use_enhanced_temporal = cfg.get("use_enhanced_temporal", True)
         if use_enhanced_temporal:
@@ -88,19 +92,18 @@ class InferencePipeline:
                 device = cfg.get("device", "cpu")
                 self.temporal = TemporalModelEnhanced(
                     model_path=models.get("temporal"),
-                    window_size=cfg.get("window_size", 48),
+                    window_size=window_size,
                     use_pytorch=True,
                     device=device
                 )
                 log.info("Using enhanced temporal model with attention")
             except Exception as e:
                 log.warning("Failed to initialize enhanced temporal model: %s, falling back to standard", e)
-                self.temporal = TemporalModel(model_path=models.get("temporal"), window_size=cfg.get("window_size", 48))
+                self.temporal = TemporalModel(model_path=models.get("temporal"), window_size=window_size)
         else:
-            self.temporal = TemporalModel(model_path=models.get("temporal"), window_size=cfg.get("window_size", 48))
+            self.temporal = TemporalModel(model_path=models.get("temporal"), window_size=window_size)
 
         # Feature Encoder (handcrafted or learned)
-        window_size = cfg.get("window_size", 48)
         use_learned_features = cfg.get("use_learned_features", False)
         
         if use_learned_features:
@@ -133,7 +136,6 @@ class InferencePipeline:
         # Initialize keypoint window for learned features
         # TODO-040: Frame buffer management (use deque with maxlen)
         from collections import deque
-        window_size = cfg.get("window_size", 48)
         self.kps_window = deque(maxlen=window_size)  # Bounded buffer
 
         self.window = deque(maxlen=window_size)  # list of feat arrays (bounded)
@@ -289,9 +291,95 @@ class InferencePipeline:
 
         # Control flag (display or external stop request)
         self.stop_requested = False
-        
+
+        # Lazy-initialized components (declared here to avoid hasattr checks)
+        self.keypoint_smoother = None
+        self.self_contact_detector = None
+        self.posture_smoother = None
+        self._enhanced_activity_classifier = None
+        self._emotion_detector = None
+        self._clinical_correlation_engine = None
+        self._kps_history = []
+
+        # Patient baseline analyzer (DBSCAN + PCA per-patient baseline)
+        self.baseline_analyzer = None
+        self._baseline_save_counter = 0
+        self._baseline_save_interval = cfg.get("baseline_save_interval", 1000)
+        if cfg.get("enable_baseline_analyzer", True):
+            try:
+                from analytics.baseline_analyzer import PatientBaselineAnalyzer
+                patient_cfg = cfg.get("patient", {})
+                patient_id = patient_cfg.get("id", "unknown")
+                device_id = cfg.get("device_id", "bed_01")
+                baseline_cfg = cfg.get("baseline", {})
+                self.baseline_analyzer = PatientBaselineAnalyzer(
+                    patient_id=patient_id,
+                    device_id=device_id,
+                    buffer_size=baseline_cfg.get("buffer_size", 5000),
+                    min_samples_for_fit=baseline_cfg.get("min_samples_for_fit", 300),
+                    refit_interval=baseline_cfg.get("refit_interval", 500),
+                    dbscan_eps=baseline_cfg.get("dbscan_eps", 0.5),
+                    dbscan_min_samples=baseline_cfg.get("dbscan_min_samples", 10),
+                    pca_components=baseline_cfg.get("pca_components", 6),
+                    pca_reconstruction_threshold=baseline_cfg.get("pca_reconstruction_threshold", 1.5),
+                    anomaly_persistence_frames=baseline_cfg.get("anomaly_persistence_frames", 15),
+                )
+                # Try loading existing baseline from database
+                self._load_baseline_from_db(patient_id, device_id)
+                log.info("Patient baseline analyzer enabled (patient=%s)", patient_id)
+            except Exception as e:
+                log.warning("Failed to initialize baseline analyzer: %s", e)
+                self.baseline_analyzer = None
+
+        # Activity temporal smoothing (TODO-070)
+        try:
+            from analytics.activity_smoother import ActivityStateMachine
+            activity_threshold = cfg.get("activity_transition_threshold", 8)
+            self.activity_smoother = ActivityStateMachine(transition_threshold=activity_threshold)
+            log.info("Activity smoother initialized (threshold: %d frames)", activity_threshold)
+        except Exception as e:
+            log.debug("Activity smoother not available: %s", e)
+            self.activity_smoother = None
+
         # TODO-033: Model warmup
         self._warmup_models()
+
+    # ------------------------------------------------------------------
+    # Baseline persistence helpers
+    # ------------------------------------------------------------------
+
+    def _load_baseline_from_db(self, patient_id, device_id):
+        """Load a previously saved baseline model from SQLite."""
+        try:
+            from storage.db import LocalDB
+            db = LocalDB()
+            record = db.load_baseline(patient_id, device_id)
+            db.close()
+            if record and self.baseline_analyzer:
+                self.baseline_analyzer.load_from_bytes(record["model_blob"])
+                log.info("Loaded baseline from DB for patient=%s", patient_id)
+        except Exception as e:
+            log.debug("No saved baseline found: %s", e)
+
+    def _save_baseline_to_db(self):
+        """Persist current baseline model to SQLite."""
+        if not self.baseline_analyzer or self.baseline_analyzer.state != "ready":
+            return
+        try:
+            from storage.db import LocalDB
+            db = LocalDB()
+            summary = self.baseline_analyzer.get_summary()
+            db.save_baseline(
+                patient_id=self.baseline_analyzer.patient_id,
+                device_id=self.baseline_analyzer.device_id,
+                model_blob=self.baseline_analyzer.serialize(),
+                n_samples=summary["total_samples"],
+                n_clusters=summary["n_clusters"],
+                fit_count=summary["fit_count"],
+            )
+            db.close()
+        except Exception as e:
+            log.warning("Failed to save baseline to DB: %s", e)
 
     def _parse_bbox(self, bbox, frame_shape):
         """
@@ -359,7 +447,141 @@ class InferencePipeline:
         except Exception as e:
             log.debug("Pose change computation failed: %s", e)
             return 1.0  # Assume maximum change on error
-    
+
+    def _compute_crop_hash(self, crop):
+        """Compute MD5 hash of crop bytes for pose caching."""
+        try:
+            crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
+            return hashlib.md5(crop_bytes).hexdigest()
+        except Exception:
+            return None
+
+    def _get_kps_history(self, n):
+        """Get last n keypoint frames from history."""
+        if len(self.kps_window) > 0:
+            return list(self.kps_window)[-n:]
+        elif self.prev_kps:
+            return [self.prev_kps]
+        return []
+
+    def _log_posture(self, state, confidence=None):
+        """Log posture state with timestamp."""
+        ts = time.time()
+        dt = datetime.fromtimestamp(ts)
+        time_str = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        if confidence is not None:
+            log.info("POSTURE [%s]: %s (confidence: %.2f)", time_str, state, confidence)
+        else:
+            log.info("POSTURE [%s]: %s", time_str, state)
+
+    def _extract_face_bbox(self, kps, frame_shape):
+        """
+        Extract face bounding box from COCO keypoints.
+        Handles side and front camera angles typical of ICU bed-side setups.
+
+        Args:
+            kps: List of keypoints [(x, y, conf), ...]
+            frame_shape: (H, W, C) frame shape
+
+        Returns:
+            [x, y, w, h] face bbox in pixel coordinates, or None if insufficient keypoints.
+        """
+        if not kps or len(kps) < 5:
+            return None
+
+        h, w = frame_shape[0], frame_shape[1]
+        face_indices = [0, 1, 2, 3, 4]  # nose, L-eye, R-eye, L-ear, R-ear
+        min_conf = 0.3
+
+        visible = []
+        for idx in face_indices:
+            if idx < len(kps) and kps[idx] is not None and len(kps[idx]) >= 3:
+                kx, ky, kc = kps[idx][0], kps[idx][1], kps[idx][2]
+                if kc > min_conf:
+                    # Convert normalized coords to pixel coords if needed
+                    if 0.0 <= kx <= 1.0 and 0.0 <= ky <= 1.0:
+                        px, py = kx * w, ky * h
+                    else:
+                        px, py = kx, ky
+                    visible.append((px, py))
+
+        if len(visible) < 2:
+            return None
+
+        xs = [p[0] for p in visible]
+        ys = [p[1] for p in visible]
+
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        spread_x = max(xs) - min(xs)
+        spread_y = max(ys) - min(ys)
+
+        # Pad to ensure full face capture (side views have asymmetric spread)
+        pad = max(spread_x, spread_y, 30) * 1.5
+        fx1 = int(max(0, cx - pad))
+        fy1 = int(max(0, cy - pad))
+        fx2 = int(min(w, cx + pad))
+        fy2 = int(min(h, cy + pad))
+
+        bw = fx2 - fx1
+        bh = fy2 - fy1
+        if bw < 10 or bh < 10:
+            return None
+
+        return [fx1, fy1, bw, bh]
+
+    def _compute_movement_features(self, kps):
+        """
+        Compute movement features (motion energy, jerk index) from keypoint history.
+
+        Returns:
+            dict with motion_energy (0-1) and jerk_index (0-1).
+        """
+        self._kps_history.append(kps)
+        max_history = 15  # ~1 second at 15 FPS
+        if len(self._kps_history) > max_history:
+            self._kps_history.pop(0)
+
+        if len(self._kps_history) < 3:
+            return {"motion_energy": 0.0, "jerk_index": 0.0}
+
+        # Compute displacements between consecutive frames
+        displacements = []
+        for i in range(1, len(self._kps_history)):
+            curr = self._kps_history[i]
+            prev = self._kps_history[i - 1]
+            if not curr or not prev or len(curr) != len(prev):
+                continue
+            disp = 0.0
+            count = 0
+            for c, p in zip(curr, prev):
+                if c is None or p is None or len(c) < 3 or len(p) < 3:
+                    continue
+                if c[2] > 0.3 and p[2] > 0.3:
+                    dx = c[0] - p[0]
+                    dy = c[1] - p[1]
+                    disp += (dx * dx + dy * dy) ** 0.5
+                    count += 1
+            if count > 0:
+                displacements.append(disp / count)
+
+        if not displacements:
+            return {"motion_energy": 0.0, "jerk_index": 0.0}
+
+        # Motion energy: mean displacement (normalized)
+        motion_energy = min(1.0, np.mean(displacements) / 0.05)
+
+        # Jerk index: variance of displacement changes (smoothness of motion)
+        jerk_index = 0.0
+        if len(displacements) >= 3:
+            accels = [displacements[i] - displacements[i - 1] for i in range(1, len(displacements))]
+            jerk_index = min(1.0, float(np.std(accels)) / 0.02)
+
+        return {
+            "motion_energy": float(motion_energy),
+            "jerk_index": float(jerk_index),
+        }
+
     def _warmup_models(self, num_warmup_frames=10):
         """
         Warmup models with dummy data to eliminate cold start latency.
@@ -538,7 +760,6 @@ class InferencePipeline:
                         frame=frame,
                         target_size_ratio=self.auto_zoom_target_size
                     )
-                    self._person_detected_this_frame = True
                 except Exception as e:
                     log.debug("Auto-zoom to person failed: %s", e)
             
@@ -574,51 +795,35 @@ class InferencePipeline:
             # TODO-008: Cache pose results for static poses
             kps = None
             if self.enable_pose_caching and self.last_cached_pose is not None:
-                # Check if crop is identical using MD5 hash (more reliable than Python hash)
-                try:
-                    crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
-                    crop_hash = hashlib.md5(crop_bytes).hexdigest()
-                    if crop_hash == self.last_cached_pose_hash:
-                        # Crop is identical, reuse cached pose
-                        kps = self.last_cached_pose
-                        log.debug("Using cached pose (static crop)")
-                except Exception as e:
-                    log.debug("Pose cache check failed: %s", e)
-            
+                # Check if crop is identical using MD5 hash
+                crop_hash = self._compute_crop_hash(crop)
+                if crop_hash and crop_hash == self.last_cached_pose_hash:
+                    kps = self.last_cached_pose
+                    log.debug("Using cached pose (static crop)")
+
             if kps is None:
                 # Run pose estimation
                 kps = self.pose.infer(crop)
                 if not kps:
                     log.debug("Pose not detected — skipping frame")
                     return None
-                
+
                 # Check if pose has changed significantly (for caching)
                 if self.enable_pose_caching and self.last_processed_kps is not None:
                     pose_change = self._compute_pose_change(kps, self.last_processed_kps)
                     if pose_change < self.pose_cache_threshold:
-                        # Pose hasn't changed significantly, cache it
                         self.last_cached_pose = kps
-                        try:
-                            crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
-                            self.last_cached_pose_hash = hashlib.md5(crop_bytes).hexdigest()
-                        except Exception:
-                            self.last_cached_pose_hash = None
+                        self.last_cached_pose_hash = self._compute_crop_hash(crop)
                         log.debug("Cached pose (change: %.4f < %.4f)", pose_change, self.pose_cache_threshold)
                     else:
-                        # Pose changed significantly, clear cache
                         self.last_cached_pose = None
                         self.last_cached_pose_hash = None
                 else:
-                    # First frame or caching disabled, cache the pose
                     self.last_cached_pose = kps
-                    try:
-                        crop_bytes = crop.tobytes()[:self.pose_cache_hash_bytes]
-                        self.last_cached_pose_hash = hashlib.md5(crop_bytes).hexdigest()
-                    except Exception:
-                        self.last_cached_pose_hash = None
+                    self.last_cached_pose_hash = self._compute_crop_hash(crop)
             
             # TODO-060: Keypoint smoothing with SC3D
-            if not hasattr(self, 'keypoint_smoother'):
+            if self.keypoint_smoother is None:
                 from pipeline.pose.keypoint_smoother import KeypointSmoother
                 use_sc3d = self.cfg.get("enable_self_contact_detection", True)
                 self.keypoint_smoother = KeypointSmoother(
@@ -678,7 +883,7 @@ class InferencePipeline:
                              pose3d_method, use_bone_constraints)
                     
                     # TODO-060: Apply keypoint smoothing with 3D contact info
-                    if hasattr(self, 'keypoint_smoother') and self.keypoint_smoother:
+                    if self.keypoint_smoother:
                         kps_smoothed = self.keypoint_smoother.smooth(kps, kps_3d)
                         kps = kps_smoothed  # Use smoothed keypoints
                     
@@ -687,7 +892,7 @@ class InferencePipeline:
                     if self.cfg.get("enable_self_contact_detection", True):
                         try:
                             from pipeline.pose.self_contact_detector import SelfContactDetector
-                            if not hasattr(self, 'self_contact_detector'):
+                            if self.self_contact_detector is None:
                                 self.self_contact_detector = SelfContactDetector()
                             self_contact_signature = self.self_contact_detector.detect(kps_3d)
                         except Exception as e:
@@ -695,7 +900,7 @@ class InferencePipeline:
                 except Exception as e:
                     log.debug("3D pose upgrade failed: %s", e)
                     # Still apply 2D smoothing if available
-                    if hasattr(self, 'keypoint_smoother') and self.keypoint_smoother:
+                    if self.keypoint_smoother:
                         kps_smoothed = self.keypoint_smoother.smooth(kps, None)
                         kps = kps_smoothed
 
@@ -723,6 +928,21 @@ class InferencePipeline:
                     # TODO-040: Frame buffer management (deque auto-bounds)
                     self.window.append(feat)  # deque automatically manages size
 
+            # --- Patient baseline: update + analyze ---
+            baseline_info = None
+            if self.baseline_analyzer and feat is not None and not np.isnan(feat).any():
+                try:
+                    self.baseline_analyzer.update(feat)
+                    baseline_info = self.baseline_analyzer.analyze(feat)
+
+                    # Periodic persistence to SQLite
+                    self._baseline_save_counter += 1
+                    if self._baseline_save_counter >= self._baseline_save_interval:
+                        self._baseline_save_counter = 0
+                        self._save_baseline_to_db()
+                except Exception as e:
+                    log.debug("Baseline analysis failed: %s", e)
+
             # update kps history
             self.prev_prev_kps = self.prev_kps
             self.prev_kps = kps
@@ -749,105 +969,59 @@ class InferencePipeline:
                 self.fps_frame_count = 0
                 self.last_fps_time = time.time()
 
-            # Fall detection (critical scenario) - before posture classification
-            fall_detected = False
-            fall_result = None
-            try:
-                from analytics.fall_detection import detect_patient_fall
-                # Get keypoint history for fall detection
-                kps_history_for_fall = []
-                if hasattr(self, 'kps_window') and len(self.kps_window) > 0:
-                    kps_history_for_fall = self.kps_window[-5:]  # Last 5 frames
-                elif self.prev_kps:
-                    kps_history_for_fall = [self.prev_kps]
-                
-                # Fall detection needs posture state, will be updated after posture classification
-                # For now, use None and update after
-                fall_result = detect_patient_fall(
-                    kps, 
-                    kps_history_for_fall,
-                    None,  # Posture state not available yet, will update
-                    frame.shape
-                )
-                fall_detected = fall_result.get('fall_detected', False)
-                
-                if fall_detected:
-                    log.critical("FALL DETECTED! Confidence: %.2f, Indicators: %d", 
-                               fall_result.get('confidence', 0.0),
-                               len(fall_result.get('indicators', [])))
-            except Exception as e:
-                log.debug("Fall detection failed: %s", e)
-
             # Instant posture classification (before decision engine)
             posture_state = "unknown"
             posture_analysis = None
             try:
                 from analytics.posture import analyze_posture, classify_posture_state
                 from analytics.posture_smoother import PostureStateMachine
-                
+
                 # Classify posture state instantly
                 posture_state = classify_posture_state(kps, use_strict_thresholds=True)
-                
-                # Log posture with timestamp
-                current_ts = time.time()
-                from datetime import datetime
-                dt = datetime.fromtimestamp(current_ts)
-                time_str = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                log.info("POSTURE [%s]: %s", time_str, posture_state)
-                
+                self._log_posture(posture_state)
+
                 # Apply temporal smoothing if enabled
-                if not hasattr(self, 'posture_smoother'):
+                if self.posture_smoother is None:
                     smoothing_frames = self.cfg.get("posture_smoothing_frames", 10)
                     transition_threshold = self.cfg.get("posture_transition_threshold", 5)
                     self.posture_smoother = PostureStateMachine(
                         transition_threshold=transition_threshold,
                         history_size=smoothing_frames
                     )
-                
-                # Update smoother and get smoothed state
-                smoothed_state = self.posture_smoother.update(posture_state)
-                posture_state = smoothed_state
-                
+
+                posture_state = self.posture_smoother.update(posture_state)
+
                 # Full posture analysis for detailed metrics
                 posture_analysis = analyze_posture(kps, features=feat)
                 posture_state = posture_analysis.get("posture_state", posture_state)
-                
-                # Log posture with timestamp (after smoothing and analysis)
-                current_ts = time.time()
-                from datetime import datetime
-                dt = datetime.fromtimestamp(current_ts)
-                time_str = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 posture_conf = posture_analysis.get("confidence", 0.0) if posture_analysis else 0.0
-                log.info("POSTURE [%s]: %s (confidence: %.2f)", time_str, posture_state, posture_conf)
-                
+                self._log_posture(posture_state, posture_conf)
+
             except Exception as e:
                 log.debug("Posture classification error: %s", e)
                 posture_state = "unknown"
-            
-            # Update fall detection with posture state if available (improves accuracy)
-            if fall_result is not None and posture_state != "unknown":
-                try:
-                    from analytics.fall_detection import detect_patient_fall
-                    kps_history_for_fall = []
-                    if hasattr(self, 'kps_window') and len(self.kps_window) > 0:
-                        kps_history_for_fall = self.kps_window[-5:]
-                    elif self.prev_kps:
-                        kps_history_for_fall = [self.prev_kps]
-                    
-                    # Re-run with posture state for better accuracy
-                    updated_fall_result = detect_patient_fall(
-                        kps,
-                        kps_history_for_fall,
-                        posture_state,
-                        frame.shape
-                    )
-                    if updated_fall_result.get('fall_detected', False):
-                        fall_result = updated_fall_result
-                        fall_detected = True
-                        log.critical("FALL DETECTED (with posture)! Confidence: %.2f", 
-                                   fall_result.get('confidence', 0.0))
-                except Exception as e:
-                    log.debug("Fall detection update failed: %s", e)
+
+            # Fall detection (single call after posture is available)
+            fall_detected = False
+            fall_result = None
+            try:
+                from analytics.fall_detection import detect_patient_fall
+                kps_history_for_fall = self._get_kps_history(5)
+
+                fall_result = detect_patient_fall(
+                    kps,
+                    kps_history_for_fall,
+                    posture_state if posture_state != "unknown" else None,
+                    frame.shape
+                )
+                fall_detected = fall_result.get('fall_detected', False)
+
+                if fall_detected:
+                    log.critical("FALL DETECTED! Confidence: %.2f, Indicators: %d",
+                               fall_result.get('confidence', 0.0),
+                               len(fall_result.get('indicators', [])))
+            except Exception as e:
+                log.debug("Fall detection failed: %s", e)
             
             # Enhanced Activity classification (all 53 activities)
             activity_state = "unknown"
@@ -865,72 +1039,57 @@ class InferencePipeline:
                     # Try enhanced classifier first (supports all 53 activities)
                     try:
                         from analytics.enhanced_activity_classifier import EnhancedActivityClassifier
-                        if not hasattr(self, '_enhanced_activity_classifier'):
+                        if self._enhanced_activity_classifier is None:
                             self._enhanced_activity_classifier = EnhancedActivityClassifier()
                             log.info("Enhanced activity classifier initialized (53 activities supported)")
                         use_enhanced = True
                     except ImportError as e:
-                        # Fallback to basic classifier
                         from analytics.activity import classify_activity
                         use_enhanced = False
                         log.debug("Enhanced classifier not available, using basic: %s", e)
-                    
-                    # Get keypoint history for activity classification
-                    kps_history_for_activity = []
-                    if hasattr(self, 'kps_window') and len(self.kps_window) > 0:
-                        kps_history_for_activity = self.kps_window[-10:]  # Last 10 frames for temporal analysis
-                    elif self.prev_kps:
-                        kps_history_for_activity = [self.prev_kps]
-                    
+
+                    kps_history_for_activity = self._get_kps_history(10)
+
                     if use_enhanced:
-                        # Enhanced classifier with all context (TODO-066: Add self-contact)
                         # Get self-contact signature if available
                         contact_signature = None
-                        if hasattr(self, 'self_contact_detector') and self.self_contact_detector and kps_3d:
+                        if self.self_contact_detector and kps_3d:
                             try:
                                 contact_signature = self.self_contact_detector.detect(kps_3d)
                             except Exception as e:
                                 log.debug("Self-contact detection for activity failed: %s", e)
-                        
+
                         activity_result = self._enhanced_activity_classifier.classify_activity(
                             kps=kps,
-                            kps_history=kps_history_for_activity if kps_history_for_activity else None,
+                            kps_history=kps_history_for_activity or None,
                             posture_state=posture_state,
                             bed_info=bed_info,
                             person_on_bed=person_on_bed,
                             fall_detected=fall_detected,
                             frame=frame,
                             bbox=[x1, y1, x2, y2],
-                            kps_3d=kps_3d,  # TODO-066: Pass 3D pose for self-contact
-                            contact_signature=contact_signature  # TODO-066: Pass contact signature
+                            kps_3d=kps_3d,
+                            contact_signature=contact_signature
                         )
                         activity_state = activity_result.get("activity", "unknown")
                         activity_confidence = activity_result.get("confidence", 0.0)
                         activity_priority = activity_result.get("priority", "MEDIUM")
-                        
-                        # Cache result for skipped frames
-                        self.last_activity_result = {
-                            "activity": activity_state,
-                            "confidence": activity_confidence,
-                            "priority": activity_priority
-                        }
-                        
+
                         # TODO-070: Apply temporal smoothing
-                        if hasattr(self, 'activity_smoother'):
+                        if self.activity_smoother:
                             activity_state = self.activity_smoother.update(activity_state, activity_confidence)
                     else:
-                        # Basic classifier (backward compatible)
-                        activity_result = classify_activity(kps, kps_history=kps_history_for_activity if kps_history_for_activity else None)
+                        activity_result = classify_activity(kps, kps_history=kps_history_for_activity or None)
                         activity_state = activity_result.get("activity", "unknown")
                         activity_confidence = activity_result.get("confidence", 0.0)
-                        activity_priority = "NORMAL"  # Default for basic classifier
-                        
-                        # Cache result for skipped frames
-                        self.last_activity_result = {
-                            "activity": activity_state,
-                            "confidence": activity_confidence,
-                            "priority": activity_priority
-                        }
+                        activity_priority = "NORMAL"
+
+                    # Cache result for skipped frames (shared across both branches)
+                    self.last_activity_result = {
+                        "activity": activity_state,
+                        "confidence": activity_confidence,
+                        "priority": activity_priority
+                    }
                 except Exception as e:
                     log.debug("Activity classification error: %s", e)
                     activity_state = "unknown"
@@ -974,10 +1133,79 @@ class InferencePipeline:
                 except Exception as e:
                     log.debug("Distance monitoring error: %s", e)
             
+            # Emotion detection (supports side/front camera angles as in ICU setup)
+            emotions = {}
+            if self._emotion_detector is None:
+                try:
+                    from analytics.emotion_detector import EmotionDetector
+                    method = self.cfg.get("emotion_detection_method", "geometric")
+                    self._emotion_detector = EmotionDetector(method=method)
+                    log.info("Emotion detection enabled (method: %s)", method)
+                except Exception as e:
+                    log.debug("Emotion detector not available: %s", e)
+
+            if self._emotion_detector is not None:
+                try:
+                    # Extract face bbox from keypoints for side/front camera angles
+                    face_bbox = self._extract_face_bbox(kps, frame.shape)
+                    emotion_result = self._emotion_detector.detect_emotions(frame, face_bbox)
+                    emotions = emotion_result
+                except Exception as e:
+                    log.debug("Emotion detection failed: %s", e)
+
+            # Frame visibility analysis
+            frame_visibility = {"completeness_score": 1.0, "visibility_type": "full"}
+            try:
+                from analytics.frame_visibility import analyze_frame_visibility
+                frame_visibility = analyze_frame_visibility(
+                    kps, bbox=[x1, y1, x2, y2], frame_shape=frame.shape[:2]
+                )
+            except Exception as e:
+                log.debug("Frame visibility analysis failed: %s", e)
+
+            # Movement features extraction (motion energy, jerk index)
+            movement_features = {}
+            try:
+                movement_features = self._compute_movement_features(kps)
+            except Exception as e:
+                log.debug("Movement features extraction failed: %s", e)
+
+            # Clinical correlation (pain, agitation, dizziness assessment)
+            clinical_correlation = None
+            try:
+                if self._clinical_correlation_engine is None:
+                    if self.cfg.get("enable_clinical_correlation", True):
+                        from analytics.clinical_correlation import ClinicalCorrelationEngine
+                        self._clinical_correlation_engine = ClinicalCorrelationEngine()
+                        log.info("Clinical correlation engine enabled")
+
+                if self._clinical_correlation_engine is not None:
+                    dist_meters = 2.0
+                    if distance_info:
+                        dist_meters = distance_info.get("distance_meters", distance_info.get("distance_cm", 200) / 100.0)
+
+                    clinical_correlation = self._clinical_correlation_engine.correlate_clinical_state(
+                        posture_state=posture_state,
+                        posture_3d=kps_3d,
+                        emotions=emotions,
+                        movement_features=movement_features,
+                        frame_visibility=frame_visibility,
+                        distance=dist_meters,
+                        self_contact=self_contact_signature,
+                    )
+
+                    if clinical_correlation:
+                        if clinical_correlation.get("pain_score", 0.0) > 0.5:
+                            log.info("High pain score: %.2f", clinical_correlation["pain_score"])
+                        if clinical_correlation.get("agitation_score", 0.0) > 0.5:
+                            log.info("High agitation score: %.2f", clinical_correlation["agitation_score"])
+            except Exception as e:
+                log.debug("Clinical correlation failed: %s", e)
+
             # Apply decision engine (blends ML + clinical features)
             try:
                 decision = apply_rules(
-                    label, probs, kps, 
+                    label, probs, kps,
                     features=feat,
                     posture_state=posture_state,
                     patient_cfg=self.cfg.get("patient"),
@@ -1041,6 +1269,11 @@ class InferencePipeline:
                 "distance_info": distance_info,  # Distance monitoring information
                 "distance_feedback": distance_feedback,  # Distance adjustment feedback
                 "self_contact": self_contact_signature,  # TODO-065: SC3D self-contact signature
+                "emotions": emotions,  # Emotion detection results
+                "frame_visibility": frame_visibility,  # Frame visibility analysis
+                "movement_features": movement_features,  # Motion energy, jerk index
+                "clinical_correlation": clinical_correlation,  # Pain, agitation, dizziness scores
+                "baseline_info": baseline_info,  # DBSCAN + PCA patient baseline anomaly info
             }
             
             # Add performance metrics if available
@@ -1111,57 +1344,6 @@ class InferencePipeline:
                     self.camera.release()
                     self.display.close()
                     exit(0)
-
-            # Additional display path (if not already displayed above)
-            if self.display and not self.display_enabled:
-                # Fallback display path
-                display_frame = frame.copy()
-                
-                # Draw segmentation if available
-                if segmentation_mask is not None:
-                    display_frame = self.display.draw_segmentation(display_frame, segmentation_mask, alpha=0.3)
-                
-                # Draw bounding box
-                track_id = result.get("track_id")
-                display_frame = self.display.draw_bbox(
-                    display_frame, 
-                    result["bbox"], 
-                    label=result["label"],
-                    track_id=track_id
-                )
-                
-                # Draw skeleton
-                try:
-                    kps_frame = []
-                    for kp in kps:
-                        if kp is None:
-                            continue
-                        kx, ky = kp[0], kp[1]
-                        if 0.0 <= kx <= 1.0 and 0.0 <= ky <= 1.0:
-                            fx = int(x1 + kx * (x2 - x1))
-                            fy = int(y1 + ky * (y2 - y1))
-                        else:
-                            fx = int(x1 + kx)
-                            fy = int(y1 + ky)
-                        kps_frame.append((fx, fy))
-                    display_frame = self.display.draw_skeleton(display_frame, kps_frame)
-                except Exception:
-                    display_frame = self.display.draw_skeleton(display_frame, [])
-                
-                # Draw metrics with posture
-                metrics = {
-                    "FPS": result["fps"],
-                    "Label": result["label"],
-                    "Posture": result.get("posture_state", "unknown"),
-                    "Conf": round(result["confidence"], 2),
-                    "Latency(ms)": round(result["inference_ms"], 1),
-                }
-                display_frame = self.display.draw_metrics(display_frame, metrics)
-                
-                if not self.display.show(display_frame):
-                    log.info("Display requested exit")
-                    self.stop_requested = True
-                    return None
 
             log.debug("FPS: %.2f  Label: %s  Latency: %.1fms", self.fps, result["label"], result["inference_ms"])
             return result

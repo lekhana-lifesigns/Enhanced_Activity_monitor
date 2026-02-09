@@ -78,34 +78,31 @@ class MqttClient:
         else:
             log.info("MQTT client disconnected")
 
+    def _publish_with_compression(self, topic, payload, qos=None):
+        """Publish payload with optional compression if large."""
+        if qos is None:
+            qos = self.cfg.get("qos", 1)
+        json_str = json.dumps(payload, separators=(',', ':'))
+        if self.use_compression and len(json_str) > 500:
+            data = compress_payload(payload)
+        else:
+            data = json_str
+        self.client.publish(topic, data, qos=qos)
+
+    def _ensure_connected(self):
+        """Reconnect if not connected."""
+        if not self.connected:
+            try:
+                self.client.reconnect()
+                time.sleep(0.1)
+            except Exception:
+                pass
+
     def publish_event(self, payload):
-        """
-        Publish event payload (backward compatible).
-        """
+        """Publish event payload (backward compatible)."""
         try:
-            # Check connection and reconnect if needed
-            if not self.connected:
-                try:
-                    self.client.reconnect()
-                    time.sleep(0.1)  # Brief wait for connection
-                except:
-                    pass  # Will fail gracefully if broker unavailable
-            
-            json_str = json.dumps(payload, separators=(',', ':'))
-            if self.use_compression and len(json_str) > 500:
-                # Compress if payload is large
-                compressed = compress_payload(payload)
-                self.client.publish(
-                    self.topic,
-                    compressed,
-                    qos=self.cfg.get("qos", 1)
-                )
-            else:
-                self.client.publish(
-                    self.topic,
-                    json_str,
-                    qos=self.cfg.get("qos", 1)
-                )
+            self._ensure_connected()
+            self._publish_with_compression(self.topic, payload)
         except Exception:
             log.debug("MQTT publish failed (broker may be unavailable)")
 
@@ -147,13 +144,7 @@ class MqttClient:
                 payload["features"] = features.tolist() if hasattr(features, 'tolist') else features
             
             # Publish to main topic
-            json_str = json.dumps(payload, separators=(',', ':'))
-            
-            if self.use_compression and len(json_str) > 500:
-                compressed = compress_payload(payload)
-                self.client.publish(self.topic, compressed, qos=self.cfg.get("qos", 1))
-            else:
-                self.client.publish(self.topic, json_str, qos=self.cfg.get("qos", 1))
+            self._publish_with_compression(self.topic, payload)
             
             # Publish to alert topic if high/medium risk
             if payload["alert"] in ["HIGH_RISK", "MEDIUM_RISK"]:
@@ -207,20 +198,31 @@ class MqttClient:
             report_topic = f"{self.cfg.get('topic_prefix')}/{self.device_id}/reports/{report_type}"
             
             # Compress report payload (reports can be large)
-            json_str = json.dumps(report_data, separators=(',', ':'))
-            if len(json_str) > 500:
-                compressed = compress_payload(report_data)
-                self.client.publish(report_topic, compressed, qos=self.cfg.get("qos", 1))
-            else:
-                self.client.publish(report_topic, json_str, qos=self.cfg.get("qos", 1))
+            self._publish_with_compression(report_topic, report_data)
             
             log.info("Published %s report to %s", report_type, report_topic)
         except Exception:
             log.exception("MQTT report publish failed")
 
+    def publish_critical_alert(self, alert_type, confidence, timestamp=None):
+        """Publish critical alert with QoS 2 (exactly-once delivery)."""
+        try:
+            topic = f"{self.cfg.get('topic_prefix')}/{self.device_id}/alerts/critical"
+            payload = {
+                "deviceId": self.device_id,
+                "alert": "CRITICAL",
+                "type": alert_type,
+                "confidence": confidence,
+                "timestamp": timestamp or time.time()
+            }
+            self.client.publish(topic, json.dumps(payload, separators=(',', ':')), qos=2)
+        except Exception:
+            log.exception("MQTT critical alert publish failed")
+
     def shutdown(self):
+        """Gracefully shutdown MQTT client."""
         try:
             self.client.loop_stop()
             self.client.disconnect()
-        except:
+        except Exception:
             pass

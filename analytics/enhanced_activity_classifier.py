@@ -13,29 +13,18 @@ from analytics.activity_definitions import (
     ALL_ACTIVITIES, CRITICAL_ACTIVITIES, HIGH_PRIORITY_ACTIVITIES,
     get_activity_priority, get_activity_info
 )
+from analytics.keypoint_utils import (
+    NOSE, LEFT_EYE, RIGHT_EYE, LEFT_EAR, RIGHT_EAR,
+    LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW,
+    LEFT_WRIST, RIGHT_WRIST, LEFT_HIP, RIGHT_HIP,
+    LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE,
+    MIN_CONFIDENCE, get_keypoint as _kp_get, point_distance,
+    compute_vertical_extent as _vert_extent,
+    compute_horizontal_extent_shoulders as _horiz_extent,
+    compute_knee_angle as _knee_angle,
+)
 
 log = logging.getLogger("enhanced_activity")
-
-# COCO Keypoint indices
-NOSE = 0
-LEFT_EYE = 1
-RIGHT_EYE = 2
-LEFT_EAR = 3
-RIGHT_EAR = 4
-LEFT_SHOULDER = 5
-RIGHT_SHOULDER = 6
-LEFT_ELBOW = 7
-RIGHT_ELBOW = 8
-LEFT_WRIST = 9
-RIGHT_WRIST = 10
-LEFT_HIP = 11
-RIGHT_HIP = 12
-LEFT_KNEE = 13
-RIGHT_KNEE = 14
-LEFT_ANKLE = 15
-RIGHT_ANKLE = 16
-
-MIN_CONFIDENCE = 0.3
 
 
 class EnhancedActivityClassifier:
@@ -687,62 +676,16 @@ class EnhancedActivityClassifier:
     # ========================================================================
     
     def _get_keypoint(self, kps, idx, default=(0.0, 0.0, 0.0)):
-        """Safely get keypoint with confidence check."""
-        if idx < len(kps) and kps[idx][2] > MIN_CONFIDENCE:
-            return kps[idx]
-        return default
-    
+        return _kp_get(kps, idx, default)
+
     def _compute_vertical_extent(self, kps):
-        """Compute vertical extent of body."""
-        try:
-            nose = self._get_keypoint(kps, NOSE)
-            lankle = self._get_keypoint(kps, LEFT_ANKLE)
-            rankle = self._get_keypoint(kps, RIGHT_ANKLE)
-            top_y = nose[1]
-            bottom_y = max(lankle[1], rankle[1])
-            return abs(bottom_y - top_y)
-        except:
-            return 0.0
-    
+        return _vert_extent(kps)
+
     def _compute_horizontal_extent(self, kps):
-        """Compute horizontal extent of body."""
-        try:
-            lshoulder = self._get_keypoint(kps, LEFT_SHOULDER)
-            rshoulder = self._get_keypoint(kps, RIGHT_SHOULDER)
-            left_x = min(lshoulder[0], rshoulder[0])
-            right_x = max(lshoulder[0], rshoulder[0])
-            return abs(right_x - left_x)
-        except:
-            return 0.0
-    
+        return _horiz_extent(kps)
+
     def _compute_knee_angle(self, kps, side='left'):
-        """Compute knee angle."""
-        try:
-            if side == 'left':
-                hip = self._get_keypoint(kps, LEFT_HIP)
-                knee = self._get_keypoint(kps, LEFT_KNEE)
-                ankle = self._get_keypoint(kps, LEFT_ANKLE)
-            else:
-                hip = self._get_keypoint(kps, RIGHT_HIP)
-                knee = self._get_keypoint(kps, RIGHT_KNEE)
-                ankle = self._get_keypoint(kps, RIGHT_ANKLE)
-            
-            v1_x = knee[0] - hip[0]
-            v1_y = knee[1] - hip[1]
-            v2_x = ankle[0] - knee[0]
-            v2_y = ankle[1] - knee[1]
-            
-            dot = v1_x * v2_x + v1_y * v2_y
-            mag1 = math.sqrt(v1_x**2 + v1_y**2)
-            mag2 = math.sqrt(v2_x**2 + v2_y**2)
-            
-            if mag1 < 1e-6 or mag2 < 1e-6:
-                return 180.0
-            
-            cos_angle = np.clip(dot / (mag1 * mag2), -1.0, 1.0)
-            return math.degrees(math.acos(cos_angle))
-        except:
-            return 180.0
+        return _knee_angle(kps, side)
     
     def _is_walking(self, kps, kps_history):
         """Detect walking from rhythmic leg movement."""
@@ -1427,6 +1370,8 @@ def classify_activity(kps, kps_history=None, **kwargs):
         person_on_bed=kwargs.get("person_on_bed"),
         fall_detected=kwargs.get("fall_detected"),
         frame=kwargs.get("frame"),
-        bbox=kwargs.get("bbox")
+        bbox=kwargs.get("bbox"),
+        kps_3d=kwargs.get("kps_3d"),
+        contact_signature=kwargs.get("contact_signature"),
     )
 

@@ -64,6 +64,62 @@ class LocalDB:
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )""")
         
+        # Patient sessions table (multi-device patient tracking)
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS patient_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            bed_id TEXT,
+            start_ts REAL NOT NULL,
+            end_ts REAL,
+            status TEXT DEFAULT 'active',
+            metadata TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        # Audit log table (HIPAA compliance)
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            action TEXT NOT NULL,
+            user_id TEXT,
+            patient_id TEXT,
+            details TEXT,
+            ip_address TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        # Patient consent table (GDPR / data governance)
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS patient_consent (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT NOT NULL,
+            consent_type TEXT NOT NULL,
+            granted BOOLEAN DEFAULT 0,
+            granted_at DATETIME,
+            revoked_at DATETIME,
+            metadata TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        # Patient baselines table (DBSCAN + PCA models per patient)
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS patient_baselines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            baseline_type TEXT NOT NULL DEFAULT 'features',
+            model_blob BLOB NOT NULL,
+            n_samples INTEGER DEFAULT 0,
+            n_clusters INTEGER DEFAULT 0,
+            fit_count INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(patient_id, device_id, baseline_type)
+        )""")
+
         # Create indexes
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_device ON events(device)")
@@ -73,8 +129,36 @@ class LocalDB:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_level ON alerts(alert_level)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_health_ts ON system_health(ts)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_health_device ON system_health(device_id)")
-        
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_patient ON patient_sessions(patient_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device ON patient_sessions(device_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON patient_sessions(status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_patient ON audit_log(patient_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_consent_patient ON patient_consent(patient_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_baselines_patient ON patient_baselines(patient_id, device_id)")
+
         self.conn.commit()
+
+    def _build_where_clause(self, device=None, start_ts=None, end_ts=None, extra_filters=None):
+        """Build WHERE clause with common filters."""
+        clauses = []
+        params = []
+        if device:
+            clauses.append("device = ?")
+            params.append(device)
+        if start_ts:
+            clauses.append("ts >= ?")
+            params.append(start_ts)
+        if end_ts:
+            clauses.append("ts <= ?")
+            params.append(end_ts)
+        if extra_filters:
+            for col, val in extra_filters.items():
+                if val is not None:
+                    clauses.append(f"{col} = ?")
+                    params.append(val)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return where, params
 
     def insert_event(self, device, label, confidence, payload):
         """
@@ -108,7 +192,7 @@ class LocalDB:
                     # Try to convert to string as last resort
                     try:
                         return str(obj)
-                    except:
+                    except (TypeError, ValueError):
                         return None
             
             # Clean payload for JSON serialization
@@ -141,22 +225,8 @@ class LocalDB:
         Returns:
             List of event dictionaries
         """
-        query = "SELECT ts, device, label, confidence, payload FROM events WHERE 1=1"
-        params = []
-        
-        if device:
-            query += " AND device = ?"
-            params.append(device)
-        
-        if start_ts:
-            query += " AND ts >= ?"
-            params.append(start_ts)
-        
-        if end_ts:
-            query += " AND ts <= ?"
-            params.append(end_ts)
-        
-        query += " ORDER BY ts DESC LIMIT ?"
+        where, params = self._build_where_clause(device, start_ts, end_ts)
+        query = "SELECT ts, device, label, confidence, payload FROM events" + where + " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
         
         try:
@@ -211,23 +281,8 @@ class LocalDB:
 
     def query_alerts(self, device=None, start_ts=None, end_ts=None, alert_level=None, limit=1000):
         """Query alerts from database."""
-        query = "SELECT id, ts, device, alert_level, label, agitation_score, delirium_risk, respiratory_distress, hand_proximity_risk, payload, acknowledged FROM alerts WHERE 1=1"
-        params = []
-        
-        if device:
-            query += " AND device = ?"
-            params.append(device)
-        if start_ts:
-            query += " AND ts >= ?"
-            params.append(start_ts)
-        if end_ts:
-            query += " AND ts <= ?"
-            params.append(end_ts)
-        if alert_level:
-            query += " AND alert_level = ?"
-            params.append(alert_level)
-        
-        query += " ORDER BY ts DESC LIMIT ?"
+        where, params = self._build_where_clause(device, start_ts, end_ts, {"alert_level": alert_level})
+        query = "SELECT id, ts, device, alert_level, label, agitation_score, delirium_risk, respiratory_distress, hand_proximity_risk, payload, acknowledged FROM alerts" + where + " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
         
         try:
@@ -303,26 +358,15 @@ class LocalDB:
 
     def get_event_statistics(self, device=None, start_ts=None, end_ts=None):
         """Get aggregated statistics for events in time range."""
+        where, params = self._build_where_clause(device, start_ts, end_ts)
         query = """
-            SELECT 
+            SELECT
                 COUNT(*) as total_events,
                 COUNT(DISTINCT label) as unique_labels,
                 AVG(confidence) as avg_confidence,
                 MIN(ts) as first_ts,
                 MAX(ts) as last_ts
-            FROM events WHERE 1=1
-        """
-        params = []
-        
-        if device:
-            query += " AND device = ?"
-            params.append(device)
-        if start_ts:
-            query += " AND ts >= ?"
-            params.append(start_ts)
-        if end_ts:
-            query += " AND ts <= ?"
-            params.append(end_ts)
+            FROM events""" + where
         
         try:
             cursor = self.conn.execute(query, params)
@@ -344,29 +388,16 @@ class LocalDB:
 
     def get_alert_statistics(self, device=None, start_ts=None, end_ts=None):
         """Get aggregated statistics for alerts in time range."""
+        where, params = self._build_where_clause(device, start_ts, end_ts)
         query = """
-            SELECT 
+            SELECT
                 alert_level,
                 COUNT(*) as count,
                 AVG(agitation_score) as avg_agitation,
                 AVG(delirium_risk) as avg_delirium,
                 AVG(respiratory_distress) as avg_respiratory,
                 AVG(hand_proximity_risk) as avg_hand_proximity
-            FROM alerts WHERE 1=1
-        """
-        params = []
-        
-        if device:
-            query += " AND device = ?"
-            params.append(device)
-        if start_ts:
-            query += " AND ts >= ?"
-            params.append(start_ts)
-        if end_ts:
-            query += " AND ts <= ?"
-            params.append(end_ts)
-        
-        query += " GROUP BY alert_level"
+            FROM alerts""" + where + " GROUP BY alert_level"
         
         try:
             cursor = self.conn.execute(query, params)
@@ -383,6 +414,114 @@ class LocalDB:
         except Exception as e:
             log.exception("Failed to get alert statistics: %s", e)
             return {}
+
+    def insert_patient_session(self, patient_id, device_id, bed_id=None, metadata=None):
+        """Start a new patient session."""
+        import time as _time
+        try:
+            self.conn.execute(
+                "INSERT INTO patient_sessions (patient_id, device_id, bed_id, start_ts, status, metadata) VALUES (?,?,?,?,?,?)",
+                (patient_id, device_id, bed_id or device_id, _time.time(), 'active',
+                 json.dumps(metadata) if metadata else None)
+            )
+            self.conn.commit()
+            log.info("Patient session started: %s on %s", patient_id, device_id)
+        except Exception as e:
+            log.exception("Failed to insert patient session: %s", e)
+
+    def end_patient_session(self, patient_id, device_id=None):
+        """End an active patient session."""
+        import time as _time
+        try:
+            query = "UPDATE patient_sessions SET status = 'ended', end_ts = ? WHERE patient_id = ? AND status = 'active'"
+            params = [_time.time(), patient_id]
+            if device_id:
+                query += " AND device_id = ?"
+                params.append(device_id)
+            self.conn.execute(query, params)
+            self.conn.commit()
+            log.info("Patient session ended: %s", patient_id)
+        except Exception as e:
+            log.exception("Failed to end patient session: %s", e)
+
+    def insert_audit_log(self, action, user_id=None, patient_id=None, details=None, ip_address=None):
+        """Insert audit log entry (HIPAA compliance)."""
+        import time as _time
+        try:
+            self.conn.execute(
+                "INSERT INTO audit_log (ts, action, user_id, patient_id, details, ip_address) VALUES (?,?,?,?,?,?)",
+                (_time.time(), action, user_id, patient_id, details, ip_address)
+            )
+            self.conn.commit()
+        except Exception as e:
+            log.exception("Failed to insert audit log: %s", e)
+
+    # ------------------------------------------------------------------
+    # Patient baseline persistence
+    # ------------------------------------------------------------------
+
+    def save_baseline(self, patient_id, device_id, model_blob, n_samples=0,
+                      n_clusters=0, fit_count=0, baseline_type="features"):
+        """Save or update a patient baseline model."""
+        try:
+            from datetime import datetime
+            now = datetime.now().isoformat()
+            self.conn.execute("""
+                INSERT INTO patient_baselines
+                    (patient_id, device_id, baseline_type, model_blob,
+                     n_samples, n_clusters, fit_count, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(patient_id, device_id, baseline_type)
+                DO UPDATE SET
+                    model_blob = excluded.model_blob,
+                    n_samples = excluded.n_samples,
+                    n_clusters = excluded.n_clusters,
+                    fit_count = excluded.fit_count,
+                    updated_at = excluded.updated_at
+            """, (patient_id, device_id, baseline_type, model_blob,
+                  n_samples, n_clusters, fit_count, now, now))
+            self.conn.commit()
+            log.info("Baseline saved: patient=%s device=%s type=%s (%d samples, %d clusters)",
+                     patient_id, device_id, baseline_type, n_samples, n_clusters)
+        except Exception as e:
+            log.exception("Failed to save baseline: %s", e)
+
+    def load_baseline(self, patient_id, device_id, baseline_type="features"):
+        """Load a patient baseline model. Returns model_blob bytes or None."""
+        try:
+            cursor = self.conn.execute(
+                "SELECT model_blob, n_samples, n_clusters, fit_count, updated_at "
+                "FROM patient_baselines WHERE patient_id = ? AND device_id = ? AND baseline_type = ?",
+                (patient_id, device_id, baseline_type)
+            )
+            row = cursor.fetchone()
+            if row:
+                log.info("Baseline loaded: patient=%s device=%s (%d samples, updated=%s)",
+                         patient_id, device_id, row[1], row[4])
+                return {
+                    "model_blob": row[0],
+                    "n_samples": row[1],
+                    "n_clusters": row[2],
+                    "fit_count": row[3],
+                    "updated_at": row[4]
+                }
+            return None
+        except Exception as e:
+            log.exception("Failed to load baseline: %s", e)
+            return None
+
+    def delete_baseline(self, patient_id, device_id, baseline_type="features"):
+        """Delete a patient baseline model."""
+        try:
+            self.conn.execute(
+                "DELETE FROM patient_baselines WHERE patient_id = ? AND device_id = ? AND baseline_type = ?",
+                (patient_id, device_id, baseline_type)
+            )
+            self.conn.commit()
+            log.info("Baseline deleted: patient=%s device=%s type=%s",
+                     patient_id, device_id, baseline_type)
+        except Exception as e:
+            log.exception("Failed to delete baseline: %s", e)
 
     def close(self):
         """Close database connection."""

@@ -1,21 +1,27 @@
 # config/security.yaml
 # Camera Security Configuration
 # Clinical-grade access control and audit logging
+#
+# IMPORTANT: Generate password hashes before deployment:
+#   python3 -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
+#
+# Or use the secure config generator:
+#   python3 -m security.secure_config --generate-credentials
 
-# Authorized users (change passwords in production!)
+# Authorized users - REPLACE HASHES BEFORE PRODUCTION
 authorized_users:
   admin:
-    password_hash: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"  # "admin123" - CHANGE IN PRODUCTION!
+    password_hash: "88ed7b377f301cfe652a345fed03cf3405c6f27bf69298d836fc85c06201d951"  # test_admin_2026 — CHANGE FOR PRODUCTION
     role: "admin"
     permissions: ["read", "write", "admin"]
-  
+
   nurse:
-    password_hash: "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"  # "password" - CHANGE IN PRODUCTION!
+    password_hash: "88ed7b377f301cfe652a345fed03cf3405c6f27bf69298d836fc85c06201d951"  # test_admin_2026 — CHANGE FOR PRODUCTION
     role: "nurse"
     permissions: ["read", "write"]
-  
+
   viewer:
-    password_hash: "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"  # "viewer123" - CHANGE IN PRODUCTION!
+    password_hash: "88ed7b377f301cfe652a345fed03cf3405c6f27bf69298d836fc85c06201d951"  # test_admin_2026 — CHANGE FOR PRODUCTION
     role: "viewer"
     permissions: ["read"]
 
@@ -42,4 +48,3 @@ policies:
   log_all_access: true  # Log all resource access
   lockout_after_failed_attempts: 5  # Lockout after N failed attempts
   lockout_duration_seconds: 300  # 5 minutes
-

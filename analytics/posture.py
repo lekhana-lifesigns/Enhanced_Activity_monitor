@@ -6,25 +6,13 @@ import numpy as np
 import math
 import logging
 
+from analytics.keypoint_utils import (
+    NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP,
+    LEFT_KNEE, RIGHT_KNEE,
+    MIN_CONFIDENCE, get_keypoint,
+)
+
 log = logging.getLogger("posture")
-
-# Keypoint indices (MoveNet/COCO)
-NOSE = 0
-LEFT_SHOULDER = 5
-RIGHT_SHOULDER = 6
-LEFT_HIP = 11
-RIGHT_HIP = 12
-LEFT_KNEE = 13
-RIGHT_KNEE = 14
-
-MIN_CONFIDENCE = 0.3
-
-
-def get_keypoint(kps, idx, default=(0.0, 0.0, 0.0)):
-    """Safely get keypoint with confidence check."""
-    if idx < len(kps) and kps[idx][2] > MIN_CONFIDENCE:
-        return kps[idx]
-    return default
 
 
 def analyze_spine_curvature(kps):

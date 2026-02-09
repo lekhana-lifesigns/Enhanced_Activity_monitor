@@ -1,7 +1,7 @@
 # Core dependencies
 numpy>=1.21.0
 opencv-python>=4.5.0
-Pillow>=8.0.0
+Pillow>=10.2.0
 pyyaml>=5.4.0
 
 # Deep learning
@@ -31,3 +31,22 @@ cryptography>=3.4.8
 # Data processing
 pandas>=1.3.0
 scipy>=1.7.0
+
+# DuckDB for clinical dataset querying
+duckdb>=0.9.0
+datasets>=2.0.0  # Hugging Face datasets library
+huggingface-hub>=0.15.0
+
+# Pose smoothing and filtering
+filterpy>=1.4.5
+
+# TensorFlow/Keras (for face recognition and TFLite)
+tensorflow>=2.8.0
+tf-keras>=2.8.0
+# protobuf version determined by tensorflow (5.x for tf 2.20+)
+
+# MediaPipe - OPTIONAL fallback only (has protobuf compatibility issues)
+# Primary pose: YOLO pose (use_yolo_pose: true in config)
+# MediaPipe 0.10.14 requires protobuf 4.x but has ABI issues with 5.x
+# If you need MediaPipe, use: pip install mediapipe==0.10.9 protobuf==4.25.3
+# mediapipe>=0.10.0  # DISABLED - use YOLO pose instead

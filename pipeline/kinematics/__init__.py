@@ -11,27 +11,28 @@ This module provides:
 """
 
 from .skeleton import (
-    SKELETON_TREE, ROOT_JOINTS, BONE_LENGTH_RATIOS,
-    get_parent, get_children, get_bone_length_ratio,
-    compute_torso_length, get_joint_name,
-    NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP
+ SKELETON_TREE, ROOT_JOINTS, BONE_LENGTH_RATIOS,
+ get_parent, get_children, get_bone_length_ratio,
+ compute_torso_length, get_joint_name,
+ NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP
 )
 
 from .forward_kinematics import ForwardKinematics
 from .camera_projection import CameraProjection
+from .bone_validator import BoneLengthValidator
 
 __all__ = [
-    'ForwardKinematics',
-    'CameraProjection',
-    'SKELETON_TREE',
-    'ROOT_JOINTS',
-    'BONE_LENGTH_RATIOS',
-    'get_parent',
-    'get_children',
-    'get_bone_length_ratio',
-    'compute_torso_length',
-    'get_joint_name',
+ 'ForwardKinematics',
+ 'CameraProjection',
+ 'BoneLengthValidator',
+ 'SKELETON_TREE',
+ 'ROOT_JOINTS',
+ 'BONE_LENGTH_RATIOS',
+ 'get_parent',
+ 'get_children',
+ 'get_bone_length_ratio',
+ 'compute_torso_length',
+ 'get_joint_name',
 ]
-
 
 

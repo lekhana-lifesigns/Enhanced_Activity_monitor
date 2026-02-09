@@ -26,7 +26,8 @@ class PatientFaceRecognizer:
     Verifies patient identity using facial features.
     """
     
-    def __init__(self, reference_faces_dir="storage/patient_faces", model_name="VGG-Face"):
+    def __init__(self, reference_faces_dir="storage/patient_faces", model_name="VGG-Face",
+                 enable_liveness=True, enable_rate_limiting=True):
         """
         Args:
             reference_faces_dir: Directory storing reference face images

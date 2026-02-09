@@ -1,14 +1,41 @@
-# eac_runner.py
+# eac.py - Enhanced Activity Monitor runner
 import yaml
-import json
 import logging
 import time
 import signal
 import sys
 import os
+import argparse
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── CLI arguments (for multi-device systemd deployment) ───────────────
+parser = argparse.ArgumentParser(description="Enhanced Activity Monitor")
+parser.add_argument("--device-id", type=str, help="Device/bed ID (overrides config)")
+parser.add_argument("--camera-idx", type=int, help="Camera index (overrides config)")
+parser.add_argument("--config", type=str, default="config/system.yaml", help="System config path")
+parser.add_argument("--mqtt-config", type=str, default="config/mqtt.yaml", help="MQTT config path")
+parser.add_argument("--mqtt-broker", type=str, help="MQTT broker address (overrides config)")
+parser.add_argument("--mqtt-port", type=int, help="MQTT broker port (overrides config)")
+parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+args = parser.parse_args()
+
+# Load configuration first (before setting up logging)
+try:
+    cfg = yaml.safe_load(open(args.config))
+    mqtt_cfg = yaml.safe_load(open(args.mqtt_config))
+except Exception as e:
+    print(f"Failed to load config: {e}")
+    sys.exit(1)
+
+# Configure logging from config or CLI
+log_level_str = cfg.get("log_level", "INFO").upper()
+if args.debug:
+    log_level_str = "DEBUG"
+log_level = getattr(logging, log_level_str, logging.INFO)
+logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("eac")
 
 from pipeline.pose.inference_pipeline import InferencePipeline
 from telemetry.mqtt_client import MqttClient
@@ -17,16 +44,15 @@ from storage.db import LocalDB
 from storage.reporting import ReportGenerator
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("eac")
-
-# Load configuration
-try:
-    cfg = yaml.safe_load(open("config/system.yaml"))
-    mqtt_cfg = yaml.safe_load(open("config/mqtt.yaml"))
-except Exception as e:
-    log.error("Failed to load config: %s", e)
-    sys.exit(1)
+# Apply CLI overrides
+if args.device_id:
+    cfg["device_id"] = args.device_id
+if args.camera_idx is not None:
+    cfg["camera_idx"] = args.camera_idx
+if args.mqtt_broker:
+    mqtt_cfg["broker"] = args.mqtt_broker
+if args.mqtt_port:
+    mqtt_cfg["port"] = args.mqtt_port
 
 # Initialize pipeline
 try:
@@ -75,7 +101,12 @@ def shutdown_executor():
     if not executor_shutdown and executor:
         try:
             log.info("Shutting down async executor...")
-            executor.shutdown(wait=True, timeout=5.0)
+            # Python 3.9+ supports timeout parameter, 3.8 does not
+            import sys
+            if sys.version_info >= (3, 9):
+                executor.shutdown(wait=True, cancel_futures=True)
+            else:
+                executor.shutdown(wait=True)
             executor_shutdown = True
         except Exception as e:
             log.warning("Error shutting down executor: %s", e)
@@ -128,17 +159,10 @@ def publish_fn(res):
                         }
                     )
                 if MQ:
-                    # Publish critical fall alert
-                    MQ.client.publish(
-                        f"{MQ.cfg.get('topic_prefix')}/{cfg['device_id']}/alerts/critical",
-                        json.dumps({
-                            "deviceId": cfg["device_id"],
-                            "alert": "CRITICAL",
-                            "type": "FALL_DETECTED",
-                            "confidence": fall_result.get("confidence", 0.0),
-                            "timestamp": res.get("ts", time.time())
-                        }),
-                        qos=2  # Highest QoS for critical alerts
+                    MQ.publish_critical_alert(
+                        alert_type="FALL_DETECTED",
+                        confidence=fall_result.get("confidence", 0.0),
+                        timestamp=res.get("ts", time.time())
                     )
             
             # Store alert if high/medium risk OR policy violation
@@ -150,6 +174,18 @@ def publish_fn(res):
                 alert_level = "MEDIUM_RISK"  # Escalate policy violations
             
             if (alert_level in ["HIGH_RISK", "MEDIUM_RISK", "CRITICAL"] or policy_violation) and DB:
+                # Include baseline anomaly context in alert payload
+                baseline_info = res.get("baseline_info")
+                alert_payload = {
+                    **decision,
+                    "policy_violation": policy_violation,
+                    "violation_type": decision.get("violation_type"),
+                }
+                if baseline_info:
+                    alert_payload["anomaly_score"] = baseline_info.get("anomaly_score", 0.0)
+                    alert_payload["baseline_state"] = baseline_info.get("baseline_state", "collecting")
+                    alert_payload["cluster_id"] = baseline_info.get("cluster_id", -1)
+
                 DB.insert_alert(
                     device=cfg["device_id"],
                     alert_level=alert_level if not policy_violation else "MEDIUM_RISK",
@@ -158,16 +194,13 @@ def publish_fn(res):
                     delirium_risk=decision.get("delirium_risk"),
                     respiratory_distress=decision.get("respiratory_distress"),
                     hand_proximity_risk=decision.get("hand_proximity_risk"),
-                    payload={
-                        **decision,
-                        "policy_violation": policy_violation,
-                        "violation_type": decision.get("violation_type")
-                    }
+                    payload=alert_payload,
                 )
                 if policy_violation:
                     log.warning("Policy violation alert stored: %s", decision.get("violation_type"))
         elif MQ:
             # Fallback to basic event publishing
+            baseline_info = res.get("baseline_info")
             payload = {
                 "deviceId": cfg["device_id"],
                 "ts": res.get("ts", time.time()),
@@ -179,15 +212,11 @@ def publish_fn(res):
                 "posture_state": res.get("posture_state", "unknown"),
                 "distance_info": res.get("distance_info"),
                 "distance_feedback": res.get("distance_feedback"),
+                "baseline_state": baseline_info.get("baseline_state") if baseline_info else "disabled",
+                "anomaly_score": baseline_info.get("anomaly_score", 0.0) if baseline_info else 0.0,
                 "system": get_health()
             }
             MQ.publish_event(payload)
-        
-        # Handle distance feedback (log prominently)
-        distance_feedback = res.get("distance_feedback")
-        if distance_feedback:
-            log.info("DISTANCE FEEDBACK: %s", distance_feedback.get("message", ""))
-            # Distance feedback is also displayed visually on screen
         
         # Store in local database
         if DB:
@@ -288,10 +317,21 @@ if __name__ == "__main__":
     log.info("Total frames processed: %d", frame_count)
     log.info("=" * 60)
     
+    # Persist baseline model before exit
+    if hasattr(PIPE, '_save_baseline_to_db'):
+        try:
+            PIPE._save_baseline_to_db()
+            log.info("Baseline model saved on shutdown")
+        except Exception as e:
+            log.warning("Failed to save baseline on shutdown: %s", e)
+
     # Shutdown async executor (atexit will also handle this, but explicit is better)
     shutdown_executor()
-    
+
     if MQ:
         MQ.shutdown()
-    
+
+    if DB:
+        DB.close()
+
     sys.exit(0)

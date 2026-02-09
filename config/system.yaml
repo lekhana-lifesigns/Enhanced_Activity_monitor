@@ -1,12 +1,33 @@
+# Clustered mode configuration (set to true for multi-camera setup)
+clustered_mode: false  # Set to true to enable clustered architecture
+
+# Single camera mode (used when clustered_mode is false)
 device_id: "bed_01"
 camera_idx: 0
 camera_resolution: [1280, 720]
 camera_fps: 15
+
+# Service ports (can be overridden via CLI arguments)
+dashboard_port: 5000  # Clinical Dashboard web interface port
+patient_portal_port: 5001  # Patient Privacy Portal port
+zmq_port: 5555  # ZeroMQ streaming port for clustered mode
+
+# Clustered mode cameras (used when clustered_mode is true)
+# Each camera streams from a Raspberry Pi to this Jetson
+cameras:
+  bed_01:
+    pi_address: "tcp://192.168.1.101:5555"  # Address of Pi-1
+    resolution: [640, 360]  # Stream resolution
+  bed_02:
+    pi_address: "tcp://192.168.1.102:5555"  # Address of Pi-2
+    resolution: [640, 360]  # Stream resolution
+  # Add more cameras as needed
+
 motion_sensitivity: 5
 enable_display: true
 
 use_edgetpu: false
-device: "cpu"  # Options: "cpu", "cuda" (for GPU), "mps" (for Apple Silicon)
+device: "cpu"  # Options: "cpu", "cuda" (for Jetson/GPU), "mps" (for Apple Silicon). Use "cuda" for Jetson deployment.
 window_size: 48
 
 # Performance optimization settings
@@ -22,6 +43,9 @@ detector_confidence: 0.5  # Higher = faster, fewer false positives (0.4-0.6 reco
 include_mask_in_result: false  # Include full mask in result (can be large, set to true for debugging)
 posture_smoothing_frames: 10  # Number of frames for posture smoothing (reduces false positives)
 posture_transition_threshold: 5  # Frames required for posture state transition (higher = more stable)
+temporal_prediction_stride: 2  # Run temporal model every N frames (reduces temporal compute)
+temporal_stride: 3  # Run temporal model every N frames (alternative name, used by wrapper)
+rules_stride: 3  # Evaluate rules every N frames (reduces rule evaluation overhead)
 use_face_recognition: true  # Enable DeepFace for patient verification
 face_model: "VGG-Face"  # DeepFace model: "VGG-Face", "Facenet", "ArcFace", "OpenFace"
 patient_faces_dir: "storage/patient_faces"  # Directory for reference face images
@@ -31,6 +55,22 @@ enable_liveness_detection: true  # Enable liveness detection (anti-spoofing)
 enable_rate_limiting: true  # Enable rate limiting for face verification
 rate_limit_max_attempts: 5  # Maximum verification attempts per window
 rate_limit_window_seconds: 60  # Time window for rate limiting
+
+# Self-contact detection (SC3D-based for clinical monitoring)
+enable_self_contact_detection: true  # Enable SC3D self-contact detection
+self_contact_geometric_threshold: 25.0  # Distance threshold in pixels for geometric contact detection (adjust based on image resolution)
+self_contact_temporal_window: 5  # Frames for temporal smoothing of contact detection
+
+# Clinical correlation (pain and agitation assessment)
+enable_clinical_correlation: true  # Enable clinical correlation engine with SC3D self-contact integration
+
+# Self-Learning Pilot System (dynamic adaptation and learning)
+enable_pilot_system: true  # Enable self-learning pilot system for dynamic adaptation
+enable_camera_control: true  # Enable dynamic camera control and zoom adaptation
+pilot_learning_rate: 0.1  # Learning rate for adaptation (0.0-1.0)
+pilot_adaptation_threshold: 0.7  # Confidence threshold for applying adaptations
+
+# Rate limiting (lockout after too many failed verifications)
 rate_limit_lockout_seconds: 300  # Lockout duration after exceeding limit
 
 # 3D Analysis Settings
@@ -42,14 +82,28 @@ camera_intrinsics_path: "models/calibration/camera_intrinsics.json"  # Optional 
 use_emotion_detection: true  # Enable emotion detection for clinical correlation
 emotion_method: "deepface"  # "deepface" (accurate), "mediapipe" (fast), or "geometric" (fallback)
 
-# Enhanced Model Settings (Phase 1 & 2 improvements)
-use_enhanced_temporal: true  # Use enhanced temporal model with attention (Phase 1)
-use_learned_features: false  # Use learned features instead of handcrafted (Phase 2) - requires training
-learned_feature_method: "transformer"  # "transformer" (accurate) or "cnn" (fast)
-use_hybrid_features: true  # Combine learned + handcrafted features (best of both)
-use_3d_pose_estimation: true  # Upgrade 2D pose to 3D for better accuracy (Phase 2)
-pose3d_method: "kinematic"  # "kinematic" (forward kinematics, anatomically valid), "pose3dm" (97% accuracy, requires model), "pedrec" (94%, requires model), "geometric" (fast, basic)
+# Enhanced Model Settings
+use_enhanced_temporal: true  # Use enhanced temporal model with attention
+use_3d_pose_estimation: true  # Upgrade 2D pose to 3D for better accuracy
+pose3d_method: "kinematic"  # "kinematic" (forward kinematics), "geometric" (fast, basic)
 use_bone_constraints: true  # Enforce bone-length constraints for anatomically valid poses
+
+# Video2IMU Feature Extraction (based on Lamsa et al. "Video2IMU: Realistic IMU features from videos")
+# Converts video keypoints to IMU-like signals for enhanced activity recognition
+enable_video2imu: true  # Enable Video2IMU feature extraction (adds 15D IMU-like features)
+video2imu:
+  reference_point: "hip"  # IMU placement simulation: "hip" (waist), "wrist", "ankle"
+  lowpass_cutoff: 12.0  # Low-pass filter cutoff frequency (Hz) for noise reduction
+  gravity_removal: true  # Remove gravity component from acceleration
+  include_angular: true  # Include angular velocity/acceleration features
+  include_statistical: false  # Include statistical features (avg, var, etc.) - adds 28D
+  fusion_method: "concatenate"  # How to combine with clinical features: "concatenate", "weighted"
+  fusion_weight: 0.5  # Weight for Video2IMU features if using weighted fusion
+
+# Display Settings
+privacy_mode: false  # Enable privacy mode - shows skeleton instead of video
+display_width: 1280  # Display window width
+display_height: 720  # Display window height
 
 # Camera Security Settings
 enable_camera_security: true  # Enable camera security (access control, encryption, audit logging)
@@ -92,20 +146,35 @@ self_contact:
 # Keypoint Smoothing Settings
 keypoint_smoothing_alpha: 0.7  # EMA smoothing factor (0-1), higher = more weight to current
 enable_keypoint_smoothing: true  # Enable keypoint smoothing
+enable_pose_smoothing: true  # Enable advanced pose smoothing (Kalman/exponential)
+pose_smoothing_method: "kalman"  # "kalman" (accurate) or "exponential" (fast)
 
 # Activity Smoothing Settings
 activity_transition_threshold: 8  # Frames required for activity state transition
 
-# Performance Optimization Settings
+# Clinical Validation Settings
+enable_clinical_validation: true  # Enable clinical-grade validation and metrics
+enable_metrics_collection: true  # Enable performance metrics collection
+metrics_window_size: 100  # Number of frames for metrics calculation
 enable_model_warmup: true  # Warmup models on startup (eliminates cold start latency)
 model_warmup_frames: 10  # Number of warmup frames
-enable_parallel_processing: false  # Enable parallel processing for independent operations (experimental)
-parallel_workers: 3  # Number of parallel workers
-use_multi_scale_pose: false  # Enable multi-scale pose estimation (better for varying person sizes, slower)
+
+# TensorRT Optimization (for Jetson deployment)
+enable_tensorrt: true  # Enable TensorRT optimization for Jetson devices (automatic model conversion, falls back gracefully if unavailable)
+tensorrt_model_dir: "models/tensorrt"  # Directory to store optimized TensorRT engines
+tensorrt_precision: "FP16"  # Precision mode: "FP32", "FP16", "INT8" (converter currently uses FP16)
+tensorrt_workspace_size: 1073741824  # Workspace size in bytes (1GB default)
+tensorrt_max_batch_size: 1  # Maximum batch size for inference
+
+# Adaptive FPS (dynamic frame rate based on activity)
+enable_adaptive_fps: false  # Enable adaptive FPS based on activity levels
+adaptive_fps_min: 5.0  # Minimum FPS during low activity
+adaptive_fps_max: 30.0  # Maximum FPS during high activity
+adaptive_fps_window: 30  # Number of frames to analyze for adaptation
 
 # Display Optimization Settings (TODO-025)
 display_render_frequency: 1  # Render every N frames (1 = every frame, 2 = every other frame, etc.)
-disable_display_in_production: false  # Disable display in production for better performance
+disable_display_in_production: false  # Set to true for headless production deployment
 
 # Frame Rate Control (TODO-030)
 enable_frame_rate_control: true  # Enable frame rate control to maintain target FPS
@@ -130,8 +199,21 @@ activity_classification_frequency: 1  # Run activity classification every N fram
 enable_pose_caching: true  # Cache pose results for static poses (20-30% faster for static scenes)
 pose_cache_threshold: 0.03  # Pose change threshold for cache invalidation (0-1), lower = more aggressive caching
 
-log_level: INFO
+log_level: DEBUG  # Change to INFO for production (DEBUG shows frame-by-frame details)
 heartbeat_interval: 5
+
+# Data Retention Policy (Clinical Compliance)
+data_retention:
+  enabled: true  # Enable automatic data cleanup
+  events_retention_days: 30  # Keep event data for 30 days
+  alerts_retention_days: 90  # Keep alerts for 90 days (longer for clinical review)
+  audit_log_retention_days: 365  # Keep audit logs for 1 year (compliance)
+  system_health_retention_days: 14  # Keep system metrics for 14 days
+  cleanup_interval_hours: 24  # Run cleanup every 24 hours
+  cleanup_time: "02:00"  # Preferred time for cleanup (HH:MM format, 24-hour)
+  disk_warning_threshold: 80  # Warn when disk usage exceeds 80%
+  disk_critical_threshold: 90  # Critical alert when disk usage exceeds 90%
+  disk_check_interval_minutes: 30  # Check disk space every 30 minutes
 
 logging:
   level: INFO
@@ -143,6 +225,19 @@ models:
   pose: "models/pose/movenet.tflite"
   pose_input_size: 192
   temporal: "models/temporal/gru.tflite"
+
+# Patient Baseline Analyzer (DBSCAN + PCA per-patient anomaly detection)
+enable_baseline_analyzer: true  # Enable patient-specific baseline modeling
+baseline_save_interval: 1000  # Persist baseline model to SQLite every N frames
+baseline:
+  buffer_size: 5000  # Max feature vectors retained in memory
+  min_samples_for_fit: 300  # Samples needed before first baseline fit (~20s at 15 FPS)
+  refit_interval: 500  # Re-fit baseline every N new samples
+  dbscan_eps: 0.5  # DBSCAN neighborhood radius (tune per feature scale)
+  dbscan_min_samples: 10  # DBSCAN min neighbors to form core point
+  pca_components: 6  # PCA components (6 of 9 dims captures ~95% variance)
+  pca_reconstruction_threshold: 1.5  # PCA error above this flags sensor drift
+  anomaly_persistence_frames: 15  # Anomaly must persist N frames before flagging (reduces false positives)
 
 # Patient configuration (for ID-based monitoring)
 patient:
