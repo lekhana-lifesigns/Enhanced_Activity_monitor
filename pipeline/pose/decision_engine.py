@@ -10,6 +10,12 @@ HAND_PROXIMITY_RISK_THRESHOLD = 0.5
 
 
 def compute_torso_angle(kps):
+    """
+    Compute torso deviation from vertical (0 = upright, 90 = horizontal).
+
+    Uses abs(dy) so the angle measures lateral tilt regardless of whether
+    the nose is above or below the hips in image coordinates (Y-down).
+    """
     try:
         if not kps or len(kps) < 13:
             return 0.0
@@ -20,7 +26,7 @@ def compute_torso_angle(kps):
         hip_y = (lhip[1] + rhip[1]) / 2.0
         dx = nose[0] - hip_x
         dy = nose[1] - hip_y
-        angle = abs(math.degrees(math.atan2(dx, dy)))
+        angle = abs(math.degrees(math.atan2(dx, abs(dy))))
         return angle
     except Exception:
         return 0.0

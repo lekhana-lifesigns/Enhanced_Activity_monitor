@@ -67,19 +67,24 @@ def get_keypoint(kps, idx, default=(0.0, 0.0, 0.0)):
 # ============================================================================
 
 def compute_velocity(kps, prev_kps, dt=1.0):
-    """Compute velocity vectors for all keypoints."""
+    """
+    Compute velocity vectors for all keypoints.
+    TODO-050: Vectorized NumPy implementation for performance.
+    """
     if not prev_kps or len(kps) != len(prev_kps):
         return None
-    
-    velocities = []
-    for i in range(len(kps)):
-        if kps[i][2] > MIN_CONFIDENCE and prev_kps[i][2] > MIN_CONFIDENCE:
-            vx = (kps[i][0] - prev_kps[i][0]) / dt
-            vy = (kps[i][1] - prev_kps[i][1]) / dt
-            velocities.append((vx, vy))
-        else:
-            velocities.append((0.0, 0.0))
-    return velocities
+
+    # Convert to NumPy arrays for vectorization
+    kps_arr = np.array(kps, dtype=np.float32)
+    prev_arr = np.array(prev_kps, dtype=np.float32)
+
+    # Compute velocities vectorized
+    valid_mask = (kps_arr[:, 2] > MIN_CONFIDENCE) & (prev_arr[:, 2] > MIN_CONFIDENCE)
+    velocities = np.zeros((len(kps), 2), dtype=np.float32)
+    velocities[valid_mask, 0] = (kps_arr[valid_mask, 0] - prev_arr[valid_mask, 0]) / dt
+    velocities[valid_mask, 1] = (kps_arr[valid_mask, 1] - prev_arr[valid_mask, 1]) / dt
+
+    return [(float(v[0]), float(v[1])) for v in velocities]
 
 
 def compute_acceleration(velocities, prev_velocities, dt=1.0):
@@ -98,60 +103,86 @@ def compute_acceleration(velocities, prev_velocities, dt=1.0):
 def compute_motion_energy(kps, prev_kps, dt=1.0):
     """
     Compute motion energy: E = 0.5 * m * v² per joint.
-    TODO-050: NumPy vectorization for performance.
-    
-    Vectorized implementation for better performance.
-    Uses normalized mass (1.0) and velocity magnitude.
+    Clamped to [0, 100] to suppress detection flicker outliers.
     """
-    if not prev_kps:
+    if not prev_kps or len(kps) != len(prev_kps):
         return 0.0
-    
-    velocities = compute_velocity(kps, prev_kps, dt)
-    if not velocities:
+
+    # Convert to NumPy arrays
+    kps_arr = np.array(kps, dtype=np.float32)
+    prev_arr = np.array(prev_kps, dtype=np.float32)
+
+    # Valid mask (both frames have confident keypoints)
+    valid_mask = (kps_arr[:, 2] > MIN_CONFIDENCE) & (prev_arr[:, 2] > MIN_CONFIDENCE)
+    if not np.any(valid_mask):
         return 0.0
-    
-    # Compute kinetic energy per joint
-    total_energy = 0.0
-    valid_joints = 0
-    
-    for vx, vy in velocities:
-        v_mag = math.sqrt(vx * vx + vy * vy)
-        # E = 0.5 * m * v² (m=1 normalized)
-        energy = 0.5 * v_mag * v_mag
-        total_energy += energy
-        valid_joints += 1
-    
-    return total_energy / max(valid_joints, 1)
+
+    # Vectorized velocity computation
+    dx = (kps_arr[valid_mask, 0] - prev_arr[valid_mask, 0]) / dt
+    dy = (kps_arr[valid_mask, 1] - prev_arr[valid_mask, 1]) / dt
+
+    # E = 0.5 * v² (mass = 1 normalized)
+    v_squared = dx * dx + dy * dy
+    energy = 0.5 * np.sum(v_squared)
+    energy_per_joint = float(energy / max(len(dx), 1))
+
+    # Clamp to reasonable range (removes outliers from detection flickers)
+    return float(np.clip(energy_per_joint, 0.0, 100.0))
 
 
 def compute_jerk_index(kps, prev_kps, prev_prev_kps, dt=1.0):
     """
     Compute jerk index: j = da/dt (acceleration derivative).
     Measures suddenness of movement changes.
+    Uses 3-point moving average pre-filter to suppress sensor jitter
+    before computing 2nd derivative (prevents noise amplification).
     """
     if not prev_kps or not prev_prev_kps:
         return 0.0
-    
-    velocities = compute_velocity(kps, prev_kps, dt)
-    prev_velocities = compute_velocity(prev_kps, prev_prev_kps, dt)
-    
-    if not velocities or not prev_velocities:
+    if len(kps) != len(prev_kps) or len(prev_kps) != len(prev_prev_kps):
         return 0.0
-    
-    accelerations = compute_acceleration(velocities, prev_velocities, dt)
-    if not accelerations:
+
+    # Convert to NumPy arrays
+    kps_arr = np.array(kps, dtype=np.float32)
+    prev_arr = np.array(prev_kps, dtype=np.float32)
+    prev_prev_arr = np.array(prev_prev_kps, dtype=np.float32)
+
+    # Valid mask (all three frames have confident keypoints)
+    valid_mask = (
+        (kps_arr[:, 2] > MIN_CONFIDENCE) &
+        (prev_arr[:, 2] > MIN_CONFIDENCE) &
+        (prev_prev_arr[:, 2] > MIN_CONFIDENCE)
+    )
+    if not np.any(valid_mask):
         return 0.0
-    
-    # Compute jerk magnitude
-    total_jerk = 0.0
-    valid_joints = 0
-    
-    for ax, ay in accelerations:
-        jerk_mag = math.sqrt(ax * ax + ay * ay)
-        total_jerk += jerk_mag
-        valid_joints += 1
-    
-    return total_jerk / max(valid_joints, 1)
+
+    # Stack 3-frame position sequence: (3, N_valid, 2)
+    positions = np.stack([
+        prev_prev_arr[valid_mask, :2],
+        prev_arr[valid_mask, :2],
+        kps_arr[valid_mask, :2],
+    ], axis=0)
+
+    # Apply 3-point moving average along time axis to suppress sensor jitter
+    # Middle frame: average of all 3; edge frames: average of 2 neighbors
+    smoothed = np.empty_like(positions)
+    smoothed[0] = (positions[0] + positions[1]) / 2.0
+    smoothed[1] = (positions[0] + positions[1] + positions[2]) / 3.0
+    smoothed[2] = (positions[1] + positions[2]) / 2.0
+
+    # Compute velocities from smoothed positions
+    v1_x = (smoothed[2, :, 0] - smoothed[1, :, 0]) / dt
+    v1_y = (smoothed[2, :, 1] - smoothed[1, :, 1]) / dt
+    v0_x = (smoothed[1, :, 0] - smoothed[0, :, 0]) / dt
+    v0_y = (smoothed[1, :, 1] - smoothed[0, :, 1]) / dt
+
+    # Acceleration = dv/dt
+    ax = (v1_x - v0_x) / dt
+    ay = (v1_y - v0_y) / dt
+
+    # Jerk magnitude
+    jerk_mag = np.sqrt(ax * ax + ay * ay)
+    return float(np.mean(jerk_mag))
 
 
 # ============================================================================
@@ -186,19 +217,29 @@ def compute_spine_angle(kps):
 
 
 def compute_neck_angle(kps):
-    """Compute neck angle (nose to mid-shoulders)."""
+    """
+    Compute neck deviation from vertical (0 = upright, 90 = horizontal).
+
+    In image coordinates Y increases downward, so the nose is above the
+    shoulders when nose_y < shoulder_y (dy < 0).  Using abs(dy) ensures
+    atan2 measures lateral deviation regardless of whether the reference
+    point is above or below.
+    """
     try:
         nose = get_keypoint(kps, NOSE)
         ls = get_keypoint(kps, LEFT_SHOULDER)
         rs = get_keypoint(kps, RIGHT_SHOULDER)
-        
+
         shoulder_x = (ls[0] + rs[0]) / 2.0
         shoulder_y = (ls[1] + rs[1]) / 2.0
-        
+
         dx = nose[0] - shoulder_x
         dy = nose[1] - shoulder_y
-        
-        angle = abs(math.degrees(math.atan2(dx, dy)))
+
+        # abs(dy) makes the angle independent of image-coord direction:
+        # upright -> dx~0, |dy|>0 -> angle~0
+        # tilted  -> |dx|>0       -> angle grows toward 90
+        angle = abs(math.degrees(math.atan2(dx, abs(dy))))
         return angle
     except Exception:
         return 0.0
@@ -354,41 +395,68 @@ def compute_thorax_expansion(kps_history):
 
 def compute_breath_rate_proxy(kps_history, fps=15.0):
     """
-    Estimate breathing rate from thorax vertical oscillation.
-    Uses FFT to find dominant frequency.
+    Estimate breathing rate from thorax vertical oscillation via FFT.
+
+    Requires at least 150 frames (~10s at 15fps) for meaningful frequency
+    resolution.  Applies a minimum-power noise gate so random keypoint
+    jitter does not produce phantom breathing readings.
+
+    Clinical range: 6-30 bpm (neonates up to 60 bpm, but ICU adults 12-20).
     """
-    if len(kps_history) < 10:
+    # Need enough frames for >= 3 FFT bins in the valid range
+    min_frames = max(60, int(fps / 0.05))  # At least 4s, ideally 10s+
+    if len(kps_history) < min_frames:
         return 0.0
-    
+
     thorax_y_positions = []
     for kps in kps_history:
         if kps:
             tx, ty = get_thorax_point(kps)
             thorax_y_positions.append(ty)
-    
-    if len(thorax_y_positions) < 10:
+
+    if len(thorax_y_positions) < min_frames:
         return 0.0
-    
+
     try:
-        # Detrend the signal
         y_signal = np.array(thorax_y_positions)
         y_detrended = signal.detrend(y_signal)
-        
-        # FFT to find dominant frequency
-        fft = np.fft.fft(y_detrended)
-        freqs = np.fft.fftfreq(len(y_detrended), 1.0 / fps)
-        
-        # Find peak in breathing range (0.1-0.5 Hz = 6-30 breaths/min)
+
+        # FFT
+        N = len(y_detrended)
+        fft_vals = np.fft.fft(y_detrended)
+        freqs = np.fft.fftfreq(N, 1.0 / fps)
+
+        # Breathing range: 0.1-0.5 Hz (6-30 bpm)
         valid_idx = (freqs > 0.1) & (freqs < 0.5)
-        if np.any(valid_idx):
-            power = np.abs(fft[valid_idx])
-            peak_idx = np.argmax(power)
-            peak_freq = freqs[valid_idx][peak_idx]
-            breath_rate = peak_freq * 60.0  # Convert to breaths/min
-            return float(np.clip(breath_rate, 0.0, 40.0))
+        if not np.any(valid_idx):
+            return 0.0
+
+        # Need at least 2 bins in valid range for a meaningful peak
+        if np.sum(valid_idx) < 2:
+            return 0.0
+
+        power = np.abs(fft_vals[valid_idx]) ** 2
+        peak_idx = np.argmax(power)
+        peak_power = power[peak_idx]
+
+        # Noise gate: peak must be significantly above the median power
+        # in the valid band (SNR > 3x median).  This prevents random
+        # keypoint jitter from producing phantom breath rates.
+        median_power = np.median(power)
+        if median_power > 0 and peak_power < 3.0 * median_power:
+            return 0.0  # No clear respiratory signal
+
+        # Also require minimum absolute amplitude (chest rise > ~1mm at 720p)
+        peak_amplitude = np.sqrt(peak_power) * 2.0 / N  # Approximate amplitude
+        if peak_amplitude < 0.001:
+            return 0.0
+
+        peak_freq = freqs[valid_idx][peak_idx]
+        breath_rate = peak_freq * 60.0
+        return float(np.clip(breath_rate, 0.0, 40.0))
     except Exception:
         pass
-    
+
     return 0.0
 
 
@@ -589,43 +657,125 @@ def compute_motion_variability(kps_history):
     """
     Compute motion variability (coefficient of variation of movement).
     Higher variability = more unpredictable motion.
+    TODO-050: Vectorized NumPy implementation.
     """
     if len(kps_history) < 5:
         return 0.0
-    
+
     try:
-        # Compute total displacement per frame
         displacements = []
         for i in range(1, len(kps_history)):
             if kps_history[i] and kps_history[i-1]:
-                total_disp = 0.0
-                valid = 0
-                for j in range(min(len(kps_history[i]), len(kps_history[i-1]))):
-                    if kps_history[i][j][2] > MIN_CONFIDENCE and kps_history[i-1][j][2] > MIN_CONFIDENCE:
-                        dx = kps_history[i][j][0] - kps_history[i-1][j][0]
-                        dy = kps_history[i][j][1] - kps_history[i-1][j][1]
-                        disp = math.sqrt(dx*dx + dy*dy)
-                        total_disp += disp
-                        valid += 1
-                if valid > 0:
-                    displacements.append(total_disp / valid)
-        
+                # Vectorized per-frame displacement
+                curr = np.array(kps_history[i], dtype=np.float32)
+                prev = np.array(kps_history[i-1], dtype=np.float32)
+
+                if curr.shape[0] != prev.shape[0]:
+                    continue
+
+                valid_mask = (curr[:, 2] > MIN_CONFIDENCE) & (prev[:, 2] > MIN_CONFIDENCE)
+                if not np.any(valid_mask):
+                    continue
+
+                dx = curr[valid_mask, 0] - prev[valid_mask, 0]
+                dy = curr[valid_mask, 1] - prev[valid_mask, 1]
+                disp = np.sqrt(dx * dx + dy * dy)
+                displacements.append(float(np.mean(disp)))
+
         if len(displacements) < 3:
             return 0.0
-        
-        # Compute coefficient of variation
-        disp_array = np.array(displacements)
+
+        # Coefficient of variation
+        disp_array = np.array(displacements, dtype=np.float32)
         mean_disp = np.mean(disp_array)
         std_disp = np.std(disp_array)
-        
+
         if mean_disp < 1e-6:
             return 0.0
-        
+
         cv = std_disp / mean_disp
-        return float(np.clip(cv, 0.0, 2.0))  # Cap at 2.0
-        
+        return float(np.clip(cv, 0.0, 2.0))
+
     except Exception:
         return 0.0
+
+
+# ============================================================================
+# ONLINE FEATURE NORMALIZATION
+# ============================================================================
+
+class RunningStandardizer:
+    """
+    Online z-score normalizer using Welford's algorithm.
+    Numerically stable running mean/variance for each feature dimension.
+    """
+
+    def __init__(self, n_features=9, warmup=100):
+        """
+        Args:
+            n_features: Number of feature dimensions
+            warmup: Samples before normalization activates (~6.7s at 15fps)
+        """
+        self.n_features = n_features
+        self.warmup = warmup
+        self.n = 0
+        self.mean = np.zeros(n_features, dtype=np.float64)
+        self.M2 = np.zeros(n_features, dtype=np.float64)
+
+    @property
+    def variance(self):
+        if self.n < 2:
+            return np.ones(self.n_features, dtype=np.float64)
+        return self.M2 / (self.n - 1)
+
+    @property
+    def std(self):
+        return np.sqrt(np.maximum(self.variance, 1e-8))
+
+    @property
+    def is_warm(self):
+        return self.n >= self.warmup
+
+    def update(self, x):
+        """Update running statistics with a new sample (Welford's algorithm)."""
+        x = np.asarray(x, dtype=np.float64)
+        self.n += 1
+        delta = x - self.mean
+        self.mean += delta / self.n
+        delta2 = x - self.mean
+        self.M2 += delta * delta2
+
+    def transform(self, x):
+        """
+        Update stats with x, then return normalized version.
+        During warmup period, returns raw features.
+        """
+        x = np.asarray(x, dtype=np.float32)
+        self.update(x)
+
+        if not self.is_warm:
+            return x
+
+        normalized = (x - self.mean.astype(np.float32)) / self.std.astype(np.float32)
+        return np.clip(normalized, -5.0, 5.0).astype(np.float32)
+
+    def get_state(self):
+        """Serialize state for persistence."""
+        return {
+            "n": self.n,
+            "mean": self.mean.copy(),
+            "M2": self.M2.copy(),
+            "warmup": self.warmup,
+            "n_features": self.n_features,
+        }
+
+    def load_state(self, state):
+        """Restore from serialized state."""
+        self.n = state["n"]
+        self.mean = state["mean"].copy()
+        self.M2 = state["M2"].copy()
+        self.warmup = state["warmup"]
+        self.n_features = state["n_features"]
 
 
 # ============================================================================
@@ -637,14 +787,52 @@ class ICUFeatureEncoder:
     ICU-Grade Agitation Feature Encoder.
     Transforms raw pose keypoints into 9-dimensional clinical feature vector.
     """
-    
-    def __init__(self, window_size=30, fps=15.0):
+
+    # Minimum frames for respiratory FFT (>=5 breathing cycles at 6 bpm = 50s)
+    RESP_BUFFER_SECONDS = 30  # 30s gives 3 cycles at 6 bpm, resolution ~0.033 Hz
+
+    # Maximum plausible keypoint displacement per frame (normalized coords).
+    # At 15 fps a fast arm swing covers ~1m in 0.3s ≈ 50px/frame at 720p ≈ 0.07 norm.
+    # Anything beyond this in a single frame is a detection glitch.
+    MAX_KP_JUMP = 0.12
+
+    def __init__(self, window_size=30, fps=15.0, normalize=True, warmup=100):
         self.window_size = window_size
         self.fps = fps
         self.kps_history = deque(maxlen=window_size)
         self.prev_kps = None
         self.prev_prev_kps = None
         self.prev_velocities = None
+        self.standardizer = RunningStandardizer(n_features=9, warmup=warmup) if normalize else None
+
+        # Dedicated respiratory buffer — much longer than GRU window
+        resp_frames = int(self.RESP_BUFFER_SECONDS * fps)
+        self._resp_history = deque(maxlen=resp_frames)
+        self._last_breath_rate = 0.0
+
+    def _reject_outlier_keypoints(self, kps):
+        """
+        Clamp keypoints that jumped further than MAX_KP_JUMP from prev frame.
+
+        A single-frame pose estimator glitch (e.g. wrist teleports to frame
+        corner) would otherwise spike motion_energy and jerk_index.  If the
+        jump exceeds physiological limits we reuse the previous position
+        but keep the current confidence (which is usually low for glitches).
+        """
+        if self.prev_kps is None or len(kps) != len(self.prev_kps):
+            return kps
+
+        cleaned = list(kps)
+        for i in range(len(kps)):
+            if kps[i][2] < MIN_CONFIDENCE or self.prev_kps[i][2] < MIN_CONFIDENCE:
+                continue
+            dx = kps[i][0] - self.prev_kps[i][0]
+            dy = kps[i][1] - self.prev_kps[i][1]
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > self.MAX_KP_JUMP:
+                # Snap back to previous position, keep current (likely low) confidence
+                cleaned[i] = (self.prev_kps[i][0], self.prev_kps[i][1], kps[i][2])
+        return cleaned
     
     def extract_feature_vector(self, kps, prev_kps=None, prev_prev_kps=None):
         """
@@ -664,30 +852,41 @@ class ICUFeatureEncoder:
         """
         if not kps or len(kps) < 5:
             return None
-        
+
+        # Reject single-frame outlier keypoints before any computation
+        kps = self._reject_outlier_keypoints(kps)
+
         # Update history
         self.kps_history.append(kps)
-        
+        self._resp_history.append(kps)
+
         # LAYER 1: Kinematic Features
         motion_energy = compute_motion_energy(kps, prev_kps or self.prev_kps, dt=1.0/self.fps)
         jerk_index = compute_jerk_index(
-            kps, 
-            prev_kps or self.prev_kps, 
+            kps,
+            prev_kps or self.prev_kps,
             prev_prev_kps or self.prev_prev_kps,
             dt=1.0/self.fps
         )
-        
+
         # LAYER 2: Postural Instability
-        spine_angle = compute_spine_angle(kps)
-        neck_angle = compute_neck_angle(kps)
-        posture_instability = (spine_angle + neck_angle) / 180.0  # Normalize to 0-1
+        spine_angle = compute_spine_angle(kps)    # 0 = upright, 90 = horizontal
+        neck_angle = compute_neck_angle(kps)      # 0 = upright, 90 = horizontal
+        # Weighted sum: spine contributes more than neck tilt.
+        # Clamp to [0, 1] — both angles are in [0, 90] for valid poses.
+        posture_instability = float(np.clip(
+            (spine_angle * 0.7 + neck_angle * 0.3) / 90.0, 0.0, 1.0
+        ))
         sway_score = compute_com_sway(list(self.kps_history))
         symmetry_index = compute_symmetry_index(kps)
-        
+
         # LAYER 3: Respiratory Proxy
+        # Use dedicated longer buffer for FFT (30s vs 3.2s GRU window)
         thorax_expansion = compute_thorax_expansion(list(self.kps_history))
-        breath_rate_proxy = compute_breath_rate_proxy(list(self.kps_history), fps=self.fps)
-        breathing_variability = compute_breathing_variability(list(self.kps_history))
+        breath_rate_proxy = compute_breath_rate_proxy(
+            list(self._resp_history), fps=self.fps
+        )
+        breathing_variability = compute_breathing_variability(list(self._resp_history))
         
         # LAYER 4: Hand-Intent Detector
         hand_proximity_risk = compute_hand_proximity_risk(kps)
@@ -716,7 +915,11 @@ class ICUFeatureEncoder:
         
         # Handle NaN/Inf
         features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=0.0)
-        
+
+        # Online z-score normalization (Welford's algorithm)
+        if self.standardizer is not None:
+            features = self.standardizer.transform(features)
+
         return features
 
 
