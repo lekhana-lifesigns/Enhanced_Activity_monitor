@@ -27,7 +27,11 @@ motion_sensitivity: 5
 enable_display: true
 
 use_edgetpu: false
-device: "cpu"  # Options: "cpu", "cuda" (for Jetson/GPU), "mps" (for Apple Silicon). Use "cuda" for Jetson deployment.
+device: "cuda"  # Options: "cpu", "cuda" (for Jetson/GPU), "mps" (for Apple Silicon). Set to "cuda" for Jetson Orin.
+
+# Jetson CSI camera settings (set use_gstreamer: true for CSI cameras, false for USB)
+use_gstreamer: false  # Enable GStreamer pipeline for Jetson CSI cameras (nvarguscamerasrc)
+camera_flip_method: 0  # CSI flip: 0=none, 2=rotate-180, 4=flip-horizontal, 6=rotate-180+flip
 window_size: 48
 
 # Performance optimization settings
@@ -84,6 +88,9 @@ emotion_method: "deepface"  # "deepface" (accurate), "mediapipe" (fast), or "geo
 
 # Enhanced Model Settings
 use_enhanced_temporal: true  # Use enhanced temporal model with attention
+temporal_use_fp16: true  # Enable FP16 inference for temporal model (GPU only, saves memory). Enabled for Jetson Orin.
+temporal_hidden_dim: 64  # GRU hidden dimension (64=34K params, 96=75K params)
+temporal_num_heads: 2  # Attention heads (2 sufficient for 9D features)
 use_3d_pose_estimation: true  # Upgrade 2D pose to 3D for better accuracy
 pose3d_method: "kinematic"  # "kinematic" (forward kinematics), "geometric" (fast, basic)
 use_bone_constraints: true  # Enforce bone-length constraints for anatomically valid poses

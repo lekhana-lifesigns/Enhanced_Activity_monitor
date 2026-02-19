@@ -264,6 +264,122 @@ class ICUMonitorDisplay:
         
         return frame
 
+    def draw_registration_overlay(self, frame, state, distance_cm, face_in_oval,
+                                   countdown, patient_id):
+        """
+        Draw guided patient registration overlay with face oval and distance feedback.
+
+        Args:
+            frame: Input frame (BGR)
+            state: Registration state (POSITIONING, FACE_ALIGNED, COUNTDOWN, DONE, FAILED)
+            distance_cm: Estimated distance in cm (0 if unknown)
+            face_in_oval: Whether detected face is inside the oval guide
+            countdown: Countdown value (3, 2, 1) or 0 if not counting
+            patient_id: Patient ID string
+        Returns:
+            Frame with registration overlay
+        """
+        h, w = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Oval dimensions (centered)
+        cx, cy = w // 2, h // 2
+        oval_w = int(w * 0.13)  # semi-axis width
+        oval_h = int(h * 0.22)  # semi-axis height
+
+        # Semi-transparent dark overlay outside oval to focus attention
+        overlay = frame.copy()
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.ellipse(mask, (cx, cy), (oval_w, oval_h), 0, 0, 360, 255, -1)
+        overlay[mask == 0] = (overlay[mask == 0] * 0.4).astype(np.uint8)
+        cv2.addWeighted(overlay, 1.0, frame, 0.0, 0, frame)
+        np.copyto(frame, overlay)
+
+        # State-based colors
+        STATE_COLORS = {
+            "POSITIONING": (255, 255, 255),   # White
+            "FACE_ALIGNED": (0, 255, 0),      # Green
+            "COUNTDOWN": (255, 200, 0),        # Cyan-ish
+            "DONE": (0, 255, 0),               # Green
+            "FAILED": (0, 0, 255),             # Red
+        }
+        color = STATE_COLORS.get(state, (255, 255, 255))
+
+        # Draw face oval guide
+        cv2.ellipse(frame, (cx, cy), (oval_w, oval_h), 0, 0, 360, color, 3)
+
+        # Corner tick marks on the oval for visual anchoring
+        for angle in [45, 135, 225, 315]:
+            rad = np.radians(angle)
+            px = int(cx + oval_w * np.cos(rad))
+            py = int(cy + oval_h * np.sin(rad))
+            cv2.circle(frame, (px, py), 5, color, -1)
+
+        # Distance guidance at top
+        bar_y = 50
+        if distance_cm > 0:
+            # Distance bar background
+            bar_x, bar_w, bar_h = 60, w - 120, 20
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
+                         (80, 80, 80), -1)
+
+            # Target zone (150-250cm for enrollment)
+            target_min, target_max = 150, 250
+            zone_left = bar_x + int(bar_w * (target_min / 400.0))
+            zone_right = bar_x + int(bar_w * (target_max / 400.0))
+            cv2.rectangle(frame, (zone_left, bar_y), (zone_right, bar_y + bar_h),
+                         (0, 120, 0), -1)
+
+            # Current position marker
+            marker_x = bar_x + int(bar_w * min(distance_cm, 400) / 400.0)
+            marker_x = max(bar_x, min(marker_x, bar_x + bar_w))
+            cv2.line(frame, (marker_x, bar_y - 5), (marker_x, bar_y + bar_h + 5),
+                    (0, 255, 255), 3)
+
+            # Distance text
+            if distance_cm < target_min:
+                dist_text = "Move BACK (too close)"
+                dist_color = (0, 0, 255)
+            elif distance_cm > target_max:
+                dist_text = "Move CLOSER (too far)"
+                dist_color = (0, 0, 255)
+            else:
+                dist_text = "Distance OK"
+                dist_color = (0, 255, 0)
+
+            cv2.putText(frame, f"{dist_text}  [{int(distance_cm)}cm]",
+                       (bar_x, bar_y - 10), font, 0.7, dist_color, 2)
+        else:
+            cv2.putText(frame, "No face detected - look at the camera",
+                       (60, bar_y), font, 0.7, (0, 0, 255), 2)
+
+        # State-specific center text
+        if state == "COUNTDOWN" and countdown > 0:
+            # Large countdown number
+            text = str(countdown)
+            (tw, th), _ = cv2.getTextSize(text, font, 4.0, 6)
+            cv2.putText(frame, text, (cx - tw // 2, cy + th // 2),
+                       font, 4.0, (255, 200, 0), 6)
+        elif state == "DONE":
+            cv2.putText(frame, "Enrolled!", (cx - 120, cy),
+                       font, 2.0, (0, 255, 0), 4)
+        elif state == "FAILED":
+            cv2.putText(frame, "Failed", (cx - 80, cy - 20),
+                       font, 2.0, (0, 0, 255), 4)
+            cv2.putText(frame, "R: Retry | Q: Quit", (cx - 130, cy + 30),
+                       font, 0.7, (255, 255, 255), 2)
+
+        # Bottom info bar
+        info_y = h - 30
+        cv2.rectangle(frame, (0, h - 60), (w, h), (40, 40, 40), -1)
+        cv2.putText(frame, f"Patient: {patient_id}", (10, info_y - 15),
+                   font, 0.6, (255, 255, 255), 1)
+        if state not in ("DONE", "FAILED"):
+            cv2.putText(frame, "SPACE: Manual capture | Q: Quit",
+                       (10, info_y + 5), font, 0.5, (180, 180, 180), 1)
+
+        return frame
+
     def show(self, frame):
         cv2.imshow(self.title, frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):

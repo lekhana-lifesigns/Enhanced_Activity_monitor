@@ -1,5 +1,6 @@
 # pipeline/pose/camera.py
 import cv2
+import sys
 import time
 import logging
 import numpy as np
@@ -7,21 +8,58 @@ from typing import Optional, Tuple, List
 
 log = logging.getLogger("camera")
 
+
+def _build_gstreamer_pipeline(sensor_id, width, height, fps, flip_method=0):
+    """Build GStreamer pipeline string for Jetson CSI camera (nvarguscamerasrc)."""
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"video/x-raw(memory:NVMM), width={width}, height={height}, "
+        f"framerate={fps}/1, format=NV12 ! "
+        f"nvvidconv flip-method={flip_method} ! "
+        f"video/x-raw, width={width}, height={height}, format=BGRx ! "
+        f"videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
+    )
+
+
 class Camera:
-    def __init__(self, index=0, resolution=(1280, 720), fps=15, enable_zoom=True):
+    def __init__(self, index=0, resolution=(1280, 720), fps=15, enable_zoom=True,
+                 use_gstreamer=False, flip_method=0):
+        """
+        Initialize camera. Supports USB cameras (default) and Jetson CSI via GStreamer.
+
+        Args:
+            index: Camera index (USB) or sensor-id (CSI)
+            resolution: (width, height)
+            fps: Target frame rate
+            enable_zoom: Enable digital zoom features
+            use_gstreamer: Use GStreamer pipeline for Jetson CSI cameras
+            flip_method: CSI flip (0=none, 2=rotate-180) — only for GStreamer mode
+        """
         self.index = index
-        self.cap = cv2.VideoCapture(index)
         self.original_resolution = tuple(resolution)
-        
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
-        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        self.use_gstreamer = use_gstreamer
+
+        if use_gstreamer and sys.platform == "linux":
+            gst_str = _build_gstreamer_pipeline(
+                index, resolution[0], resolution[1], fps, flip_method
+            )
+            log.info("Opening CSI camera via GStreamer: sensor-id=%d", index)
+            self.cap = cv2.VideoCapture(gst_str, cv2.CAP_GSTREAMER)
+        else:
+            if use_gstreamer and sys.platform != "linux":
+                log.warning("GStreamer CSI not available on %s, falling back to USB", sys.platform)
+                self.use_gstreamer = False
+            self.cap = cv2.VideoCapture(index)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
+            self.cap.set(cv2.CAP_PROP_FPS, fps)
 
         time.sleep(0.2)  # allow warm-up
 
         if not self.cap.isOpened():
             raise RuntimeError(f"Camera {index} could not be opened")
-        log.info(f"Camera {index} opened with resolution {resolution} at {fps} FPS")
+        mode = "CSI/GStreamer" if self.use_gstreamer else "USB"
+        log.info("Camera %d opened (%s) at %s @ %d FPS", index, mode, resolution, fps)
         self.last=time.time()
         self.fps=fps
         

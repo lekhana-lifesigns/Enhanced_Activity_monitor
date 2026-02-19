@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import hashlib
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .camera import Camera
 from pipeline.detectors.detector import Detector
 from .pose_estimator import PoseEstimator
@@ -28,7 +29,11 @@ class InferencePipeline:
         camres = tuple(cfg.get("camera_resolution", (1280, 720)))
         fps = cfg.get("camera_fps", 15)
 
-        self.camera = Camera(index=cfg.get("camera_idx", 0), resolution=camres, fps=fps)
+        self.camera = Camera(
+            index=cfg.get("camera_idx", 0), resolution=camres, fps=fps,
+            use_gstreamer=cfg.get("use_gstreamer", False),
+            flip_method=cfg.get("camera_flip_method", 0),
+        )
         models = cfg.get("models", {})
         
         # Detector initialization with segmentation support
@@ -90,18 +95,36 @@ class InferencePipeline:
         if use_enhanced_temporal:
             try:
                 device = cfg.get("device", "cpu")
+                use_fp16 = cfg.get("temporal_use_fp16", False)
                 self.temporal = TemporalModelEnhanced(
                     model_path=models.get("temporal"),
                     window_size=window_size,
                     use_pytorch=True,
-                    device=device
+                    device=device,
+                    use_fp16=use_fp16,
                 )
-                log.info("Using enhanced temporal model with attention")
+                # Wire temporal stride from config
+                self.temporal._prediction_stride = cfg.get("temporal_prediction_stride", 1)
+                log.info("Using enhanced temporal model (stride=%d, fp16=%s)",
+                         self.temporal._prediction_stride, use_fp16)
             except Exception as e:
                 log.warning("Failed to initialize enhanced temporal model: %s, falling back to standard", e)
                 self.temporal = TemporalModel(model_path=models.get("temporal"), window_size=window_size)
         else:
             self.temporal = TemporalModel(model_path=models.get("temporal"), window_size=window_size)
+
+        # Training data collection (opt-in, for future GRU training)
+        self.training_collector = None
+        if cfg.get("collect_training_data", False):
+            try:
+                from pipeline.pose.temporal_model_enhanced import TrainingDataCollector
+                self.training_collector = TrainingDataCollector(
+                    save_dir=cfg.get("training_data_dir", "data/training_collection"),
+                    min_confidence=cfg.get("training_min_confidence", 0.7),
+                )
+                self.training_collector.enable()
+            except Exception as e:
+                log.warning("Failed to initialize training data collector: %s", e)
 
         # Feature Encoder (handcrafted or learned)
         use_learned_features = cfg.get("use_learned_features", False)
@@ -299,7 +322,20 @@ class InferencePipeline:
         self._enhanced_activity_classifier = None
         self._emotion_detector = None
         self._clinical_correlation_engine = None
+        self._clinical_monitor = None  # Bed exit, fall risk, immobility detection
         self._kps_history = []
+
+        # Parallel executor for classification tasks (Jetson optimization)
+        # Uses ThreadPoolExecutor for I/O-bound tasks (analytics can release GIL)
+        self.enable_parallel_classification = cfg.get("enable_parallel_classification", True)
+        self._classification_executor = None
+        if self.enable_parallel_classification:
+            # 4 workers: activity, emotion, clinical_correlation, clinical_monitor
+            self._classification_executor = ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix="classify"
+            )
+            log.info("Parallel classification enabled (4 workers)")
 
         # Patient baseline analyzer (DBSCAN + PCA per-patient baseline)
         self.baseline_analyzer = None
@@ -582,6 +618,130 @@ class InferencePipeline:
             "jerk_index": float(jerk_index),
         }
 
+    # ══════════════════════════════════════════════════════════════════════
+    # PARALLEL CLASSIFICATION TASK HELPERS
+    # These methods are designed to run in ThreadPoolExecutor
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _task_distance_monitoring(self, kps, kps_3d, x1, y1, x2, y2, frame_shape):
+        """Task: Distance monitoring (thread-safe)."""
+        distance_info = None
+        distance_feedback = None
+        try:
+            distance = 0.0
+            if kps_3d:
+                distance = self.distance_monitor.estimate_distance_from_3d(kps_3d)
+            else:
+                distance = self.distance_monitor.estimate_distance_from_keypoints(
+                    kps, bbox=[x1, y1, x2, y2], frame_shape=frame_shape
+                )
+
+            if distance > 0:
+                distance_info = self.distance_monitor.check_distance(distance)
+                distance_feedback = self.distance_monitor.get_feedback(distance, force=False)
+        except Exception as e:
+            log.debug("Distance monitoring task error: %s", e)
+        return distance_info, distance_feedback
+
+    def _task_emotion_detection(self, frame, kps):
+        """Task: Emotion detection (thread-safe)."""
+        emotions = {}
+        try:
+            if self._emotion_detector is None:
+                from analytics.emotion_detector import EmotionDetector
+                method = self.cfg.get("emotion_detection_method", "geometric")
+                self._emotion_detector = EmotionDetector(method=method)
+                log.info("Emotion detection enabled (method: %s)", method)
+
+            if self._emotion_detector is not None:
+                face_bbox = self._extract_face_bbox(kps, frame.shape)
+                emotions = self._emotion_detector.detect_emotions(frame, face_bbox) or {}
+        except Exception as e:
+            log.debug("Emotion detection task error: %s", e)
+        return emotions
+
+    def _task_frame_visibility(self, kps, x1, y1, x2, y2, frame_shape_2d):
+        """Task: Frame visibility analysis (thread-safe)."""
+        try:
+            from analytics.frame_visibility import analyze_frame_visibility
+            return analyze_frame_visibility(
+                kps, bbox=[x1, y1, x2, y2], frame_shape=frame_shape_2d
+            )
+        except Exception as e:
+            log.debug("Frame visibility task error: %s", e)
+            return {"completeness_score": 1.0, "visibility_type": "full"}
+
+    def _task_clinical_correlation(self, posture_state, kps_3d, emotions,
+                                   movement_features, frame_visibility,
+                                   distance_info, self_contact_signature):
+        """Task: Clinical correlation (pain, agitation, dizziness)."""
+        clinical_correlation = None
+        try:
+            if self._clinical_correlation_engine is None:
+                if self.cfg.get("enable_clinical_correlation", True):
+                    from analytics.clinical_correlation import ClinicalCorrelationEngine
+                    self._clinical_correlation_engine = ClinicalCorrelationEngine()
+                    log.info("Clinical correlation engine enabled")
+
+            if self._clinical_correlation_engine is not None:
+                dist_meters = 2.0
+                if distance_info:
+                    dist_meters = distance_info.get(
+                        "distance_meters",
+                        distance_info.get("distance_cm", 200) / 100.0
+                    )
+
+                clinical_correlation = self._clinical_correlation_engine.correlate_clinical_state(
+                    posture_state=posture_state,
+                    posture_3d=kps_3d,
+                    emotions=emotions,
+                    movement_features=movement_features,
+                    frame_visibility=frame_visibility,
+                    distance=dist_meters,
+                    self_contact=self_contact_signature,
+                )
+        except Exception as e:
+            log.debug("Clinical correlation task error: %s", e)
+        return clinical_correlation
+
+    def _task_clinical_monitor(self, posture_state, posture_confidence,
+                               support_surface_info, activity_state,
+                               activity_confidence, movement_features, baseline_info):
+        """Task: Clinical monitor (bed exit, fall risk, immobility)."""
+        clinical_alerts = []
+        try:
+            if self._clinical_monitor is None:
+                if self.cfg.get("enable_clinical_monitor", True):
+                    from analytics.clinical_monitor import ClinicalMonitor
+                    self._clinical_monitor = ClinicalMonitor(
+                        window_size=self.cfg.get("clinical_window_size", 300),
+                        alert_cooldown=self.cfg.get("alert_cooldown", 60)
+                    )
+                    log.info("Clinical monitor enabled (bed exit, fall risk, immobility)")
+
+            if self._clinical_monitor is not None:
+                pose_result = {
+                    "posture": posture_state,
+                    "posture_confidence": posture_confidence,
+                    "support_surface": support_surface_info,
+                    "support_confidence": support_surface_info.get("confidence", 0.0) if support_surface_info else 0.0,
+                    "pelvis_height_norm": movement_features.get("pelvis_height", 0.5) if movement_features else 0.5,
+                    "vertical_velocity": movement_features.get("vertical_velocity", 0.0) if movement_features else 0.0,
+                }
+                activity_result = {
+                    "activity": activity_state,
+                    "confidence": activity_confidence,
+                }
+
+                clinical_alerts = self._clinical_monitor.update_clinical_state(
+                    pose_result=pose_result,
+                    activity_result=activity_result,
+                    baseline_info=baseline_info
+                )
+        except Exception as e:
+            log.debug("Clinical monitor task error: %s", e)
+        return clinical_alerts
+
     def _warmup_models(self, num_warmup_frames=10):
         """
         Warmup models with dummy data to eliminate cold start latency.
@@ -599,7 +759,7 @@ class InferencePipeline:
                     self.pose.infer(dummy_frame)
                     # Warmup temporal model (if enough frames)
                     if i >= 8:
-                        dummy_feat = np.random.randn(self.temporal.window_size, 13).astype(np.float32)
+                        dummy_feat = np.random.randn(self.temporal.window_size, 9).astype(np.float32)
                         self.temporal.predict(dummy_feat)
                 except Exception as e:
                     log.debug("Warmup frame %d failed: %s", i, e)
@@ -948,16 +1108,21 @@ class InferencePipeline:
             self.prev_kps = kps
 
             # Temporal model prediction when enough frames
-            label, conf, probs = ("normal", 1.0, [1.0])
+            label, conf, probs, uncertainty = ("normal", 1.0, [1.0], 0.0)
             if len(self.window) >= max(8, self.temporal.window_size // 4):
                 feat_win = np.stack(self.window[-self.temporal.window_size :])  # (T,F)
-                
+
                 # Validate features (edge case: NaN/Inf values)
                 if np.isnan(feat_win).any() or np.isinf(feat_win).any():
                     log.warning("NaN/Inf values in feature window, skipping prediction")
-                    label, conf, probs = ("unknown", 0.0, [0.0])
+                    label, conf, probs, uncertainty = ("unknown", 0.0, [0.0], 1.0)
                 else:
-                    label, conf, probs = self.temporal.predict(feat_win)
+                    label, conf, probs, uncertainty = self.temporal.predict(feat_win)
+
+                # If temporal model is untrained, use neutral defaults so decision tree dominates
+                if label == "untrained":
+                    label, conf, probs = ("normal", 0.0, [1.0 / len(self.temporal.labels)] * len(self.temporal.labels))
+                    log.debug("Temporal model untrained - relying on decision tree")
 
             inference_ms = (time.time() - st) * 1000.0
 
@@ -969,37 +1134,86 @@ class InferencePipeline:
                 self.fps_frame_count = 0
                 self.last_fps_time = time.time()
 
-            # Instant posture classification (before decision engine)
+            # Instant posture classification using new unified PostureSystem
+            # (includes support surface detection, temporal hysteresis, proper confidence)
             posture_state = "unknown"
             posture_analysis = None
+            posture_confidence = 0.0
+            support_surface_info = None
+
             try:
-                from analytics.posture import analyze_posture, classify_posture_state
-                from analytics.posture_smoother import PostureStateMachine
+                # Try new unified posture system first (enterprise-grade)
+                from analytics.posture_system import get_posture_system
 
-                # Classify posture state instantly
-                posture_state = classify_posture_state(kps, use_strict_thresholds=True)
-                self._log_posture(posture_state)
-
-                # Apply temporal smoothing if enabled
-                if self.posture_smoother is None:
-                    smoothing_frames = self.cfg.get("posture_smoothing_frames", 10)
-                    transition_threshold = self.cfg.get("posture_transition_threshold", 5)
-                    self.posture_smoother = PostureStateMachine(
-                        transition_threshold=transition_threshold,
-                        history_size=smoothing_frames
+                if not hasattr(self, '_posture_system') or self._posture_system is None:
+                    self._posture_system = get_posture_system(
+                        stability_window=self.cfg.get("posture_stability_window", 8),
+                        state_persistence_time=self.cfg.get("posture_persistence_time", 0.8),
                     )
+                    log.info("Unified PostureSystem initialized (support surface + temporal hysteresis)")
 
-                posture_state = self.posture_smoother.update(posture_state)
+                # Get person ID for tracking (use track_id or generate one)
+                person_id = f"person_{current_track_id}" if current_track_id else "person_default"
 
-                # Full posture analysis for detailed metrics
-                posture_analysis = analyze_posture(kps, features=feat)
-                posture_state = posture_analysis.get("posture_state", posture_state)
-                posture_conf = posture_analysis.get("confidence", 0.0) if posture_analysis else 0.0
-                self._log_posture(posture_state, posture_conf)
+                # Process frame through unified posture system
+                posture_result = self._posture_system.process_frame(
+                    person_id=person_id,
+                    keypoints=kps,
+                    frame_shape=frame.shape[:2],
+                    depth_map=None,  # Will use keypoint-based depth estimation
+                )
+
+                posture_state = posture_result.get("posture", "UNKNOWN")
+                posture_confidence = posture_result.get("confidence", 0.0)
+                support_surface_info = {
+                    "surface_id": posture_result.get("support_surface_id"),
+                    "surface_type": posture_result.get("support_surface_type"),
+                    "support": posture_result.get("support"),
+                }
+
+                # Build posture analysis dict for backward compatibility
+                posture_analysis = {
+                    "posture_state": posture_state,
+                    "confidence": posture_confidence,
+                    "subtype": posture_result.get("subtype"),
+                    "temporal_stability": posture_result.get("temporal_stability", 0.0),
+                    "time_in_state": posture_result.get("time_in_state", 0.0),
+                    "support_surface": support_surface_info,
+                    "raw_state": posture_result.get("raw_state"),
+                }
+
+                self._log_posture(posture_state, posture_confidence)
+
+            except ImportError:
+                # Fallback to legacy posture system if new one not available
+                log.debug("New posture system not available, using legacy")
+                try:
+                    from analytics.posture import analyze_posture, classify_posture_state
+                    from analytics.posture_smoother import PostureStateMachine
+
+                    posture_state = classify_posture_state(kps, use_strict_thresholds=True)
+                    self._log_posture(posture_state)
+
+                    if self.posture_smoother is None:
+                        smoothing_frames = self.cfg.get("posture_smoothing_frames", 10)
+                        transition_threshold = self.cfg.get("posture_transition_threshold", 5)
+                        self.posture_smoother = PostureStateMachine(
+                            transition_threshold=transition_threshold,
+                            history_size=smoothing_frames
+                        )
+
+                    posture_state = self.posture_smoother.update(posture_state)
+                    posture_analysis = analyze_posture(kps, features=feat)
+                    posture_state = posture_analysis.get("posture_state", posture_state)
+                    posture_confidence = posture_analysis.get("confidence", 0.0)
+                    self._log_posture(posture_state, posture_confidence)
+                except Exception as e:
+                    log.debug("Legacy posture classification error: %s", e)
 
             except Exception as e:
                 log.debug("Posture classification error: %s", e)
-                posture_state = "unknown"
+                posture_state = "UNKNOWN"
+                posture_confidence = 0.0
 
             # Fall detection (single call after posture is available)
             fall_detected = False
@@ -1109,98 +1323,165 @@ class InferencePipeline:
                     activity_confidence = 0.0
                     activity_priority = "MEDIUM"
             
-            # Distance monitoring and feedback
+            # Collect training data for future GRU training (opt-in)
+            if (self.training_collector and self.training_collector.enabled
+                    and len(self.window) >= self.temporal.window_size
+                    and activity_state != "unknown"):
+                feat_win_for_collection = np.stack(self.window[-self.temporal.window_size:])
+                self.training_collector.collect(
+                    feat_window=feat_win_for_collection,
+                    label=activity_state,
+                    confidence=activity_confidence,
+                    metadata={"posture": posture_state},
+                )
+
+            # ══════════════════════════════════════════════════════════════════
+            # PARALLEL CLASSIFICATION TASKS (Jetson GPU/CPU optimization)
+            # These tasks are independent and can run concurrently
+            # ══════════════════════════════════════════════════════════════════
+
+            # Prepare shared context for parallel tasks
+            parallel_context = {
+                "kps": kps,
+                "kps_3d": kps_3d,
+                "frame": frame,
+                "bbox": [x1, y1, x2, y2],
+                "posture_state": posture_state,
+                "posture_confidence": posture_confidence,
+                "support_surface_info": support_surface_info,
+                "activity_state": activity_state,
+                "activity_confidence": activity_confidence,
+                "baseline_info": baseline_info,
+                "self_contact_signature": self_contact_signature,
+            }
+
+            # Initialize results with defaults
             distance_info = None
             distance_feedback = None
-            if self.distance_monitor:
-                try:
-                    # Estimate distance (prefer 3D if available, otherwise 2D)
-                    distance = 0.0
-                    if kps_3d:
-                        distance = self.distance_monitor.estimate_distance_from_3d(kps_3d)
-                    else:
-                        distance = self.distance_monitor.estimate_distance_from_keypoints(
-                            kps, bbox=[x1, y1, x2, y2], frame_shape=frame.shape
-                        )
-                    
-                    if distance > 0:
-                        distance_info = self.distance_monitor.check_distance(distance)
-                        # Get feedback if adjustment needed (throttled to avoid spamming)
-                        distance_feedback = self.distance_monitor.get_feedback(distance, force=False)
-                        
-                        if distance_feedback:
-                            log.info("Distance feedback: %s", distance_feedback["message"])
-                except Exception as e:
-                    log.debug("Distance monitoring error: %s", e)
-            
-            # Emotion detection (supports side/front camera angles as in ICU setup)
             emotions = {}
-            if self._emotion_detector is None:
-                try:
-                    from analytics.emotion_detector import EmotionDetector
-                    method = self.cfg.get("emotion_detection_method", "geometric")
-                    self._emotion_detector = EmotionDetector(method=method)
-                    log.info("Emotion detection enabled (method: %s)", method)
-                except Exception as e:
-                    log.debug("Emotion detector not available: %s", e)
-
-            if self._emotion_detector is not None:
-                try:
-                    # Extract face bbox from keypoints for side/front camera angles
-                    face_bbox = self._extract_face_bbox(kps, frame.shape)
-                    emotion_result = self._emotion_detector.detect_emotions(frame, face_bbox)
-                    emotions = emotion_result
-                except Exception as e:
-                    log.debug("Emotion detection failed: %s", e)
-
-            # Frame visibility analysis
             frame_visibility = {"completeness_score": 1.0, "visibility_type": "full"}
-            try:
-                from analytics.frame_visibility import analyze_frame_visibility
-                frame_visibility = analyze_frame_visibility(
-                    kps, bbox=[x1, y1, x2, y2], frame_shape=frame.shape[:2]
-                )
-            except Exception as e:
-                log.debug("Frame visibility analysis failed: %s", e)
-
-            # Movement features extraction (motion energy, jerk index)
             movement_features = {}
+            clinical_correlation = None
+            clinical_alerts = []
+
+            # Movement features must run first (used by clinical monitor)
             try:
                 movement_features = self._compute_movement_features(kps)
             except Exception as e:
                 log.debug("Movement features extraction failed: %s", e)
 
-            # Clinical correlation (pain, agitation, dizziness assessment)
-            clinical_correlation = None
-            try:
-                if self._clinical_correlation_engine is None:
-                    if self.cfg.get("enable_clinical_correlation", True):
-                        from analytics.clinical_correlation import ClinicalCorrelationEngine
-                        self._clinical_correlation_engine = ClinicalCorrelationEngine()
-                        log.info("Clinical correlation engine enabled")
+            if self.enable_parallel_classification and self._classification_executor:
+                # ── PARALLEL EXECUTION PATH ──────────────────────────────────
+                futures = {}
 
-                if self._clinical_correlation_engine is not None:
-                    dist_meters = 2.0
-                    if distance_info:
-                        dist_meters = distance_info.get("distance_meters", distance_info.get("distance_cm", 200) / 100.0)
-
-                    clinical_correlation = self._clinical_correlation_engine.correlate_clinical_state(
-                        posture_state=posture_state,
-                        posture_3d=kps_3d,
-                        emotions=emotions,
-                        movement_features=movement_features,
-                        frame_visibility=frame_visibility,
-                        distance=dist_meters,
-                        self_contact=self_contact_signature,
+                # Task 1: Distance monitoring
+                if self.distance_monitor:
+                    futures["distance"] = self._classification_executor.submit(
+                        self._task_distance_monitoring, kps, kps_3d, x1, y1, x2, y2, frame.shape
                     )
 
-                    if clinical_correlation:
-                        if clinical_correlation.get("pain_score", 0.0) > 0.5:
-                            log.info("High pain score: %.2f", clinical_correlation["pain_score"])
-                        if clinical_correlation.get("agitation_score", 0.0) > 0.5:
-                            log.info("High agitation score: %.2f", clinical_correlation["agitation_score"])
-            except Exception as e:
-                log.debug("Clinical correlation failed: %s", e)
+                # Task 2: Emotion detection
+                futures["emotion"] = self._classification_executor.submit(
+                    self._task_emotion_detection, frame, kps
+                )
+
+                # Task 3: Frame visibility
+                futures["visibility"] = self._classification_executor.submit(
+                    self._task_frame_visibility, kps, x1, y1, x2, y2, frame.shape[:2]
+                )
+
+                # Task 4: Clinical correlation (depends on emotion, visibility, movement)
+                # We'll run this after collecting dependent results
+
+                # Collect parallel results with timeout (50ms max wait)
+                for task_name, future in futures.items():
+                    try:
+                        result = future.result(timeout=0.05)
+                        if task_name == "distance":
+                            distance_info, distance_feedback = result
+                        elif task_name == "emotion":
+                            emotions = result or {}
+                        elif task_name == "visibility":
+                            frame_visibility = result or {"completeness_score": 1.0, "visibility_type": "full"}
+                    except Exception as e:
+                        log.debug("Parallel task %s failed: %s", task_name, e)
+
+                # Clinical correlation (now has dependencies)
+                try:
+                    clinical_correlation = self._task_clinical_correlation(
+                        posture_state, kps_3d, emotions, movement_features,
+                        frame_visibility, distance_info, self_contact_signature
+                    )
+                except Exception as e:
+                    log.debug("Clinical correlation failed: %s", e)
+
+                # Clinical monitor (depends on activity_state, movement_features)
+                try:
+                    clinical_alerts = self._task_clinical_monitor(
+                        posture_state, posture_confidence, support_surface_info,
+                        activity_state, activity_confidence, movement_features, baseline_info
+                    )
+                except Exception as e:
+                    log.debug("Clinical monitor failed: %s", e)
+
+            else:
+                # ── SEQUENTIAL EXECUTION PATH (fallback) ─────────────────────
+                # Distance monitoring
+                if self.distance_monitor:
+                    try:
+                        distance_info, distance_feedback = self._task_distance_monitoring(
+                            kps, kps_3d, x1, y1, x2, y2, frame.shape
+                        )
+                    except Exception as e:
+                        log.debug("Distance monitoring error: %s", e)
+
+                # Emotion detection
+                try:
+                    emotions = self._task_emotion_detection(frame, kps) or {}
+                except Exception as e:
+                    log.debug("Emotion detection failed: %s", e)
+
+                # Frame visibility
+                try:
+                    frame_visibility = self._task_frame_visibility(kps, x1, y1, x2, y2, frame.shape[:2])
+                except Exception as e:
+                    log.debug("Frame visibility analysis failed: %s", e)
+
+                # Clinical correlation
+                try:
+                    clinical_correlation = self._task_clinical_correlation(
+                        posture_state, kps_3d, emotions, movement_features,
+                        frame_visibility, distance_info, self_contact_signature
+                    )
+                except Exception as e:
+                    log.debug("Clinical correlation failed: %s", e)
+
+                # Clinical monitor
+                try:
+                    clinical_alerts = self._task_clinical_monitor(
+                        posture_state, posture_confidence, support_surface_info,
+                        activity_state, activity_confidence, movement_features, baseline_info
+                    )
+                except Exception as e:
+                    log.debug("Clinical monitor failed: %s", e)
+
+            # Log distance feedback if present
+            if distance_feedback:
+                log.info("Distance feedback: %s", distance_feedback["message"])
+
+            # Log clinical correlation scores
+            if clinical_correlation:
+                if clinical_correlation.get("pain_score", 0.0) > 0.5:
+                    log.info("High pain score: %.2f", clinical_correlation["pain_score"])
+                if clinical_correlation.get("agitation_score", 0.0) > 0.5:
+                    log.info("High agitation score: %.2f", clinical_correlation["agitation_score"])
+
+            # Log clinical alerts
+            for alert in clinical_alerts:
+                if alert.get("severity") == "high":
+                    log.warning("CLINICAL ALERT [%s]: %s", alert.get("type"), alert.get("message"))
+                elif alert.get("type") == "bed_exit":
+                    log.info("BED EXIT detected: %s", alert.get("message"))
 
             # Apply decision engine (blends ML + clinical features)
             try:
@@ -1242,6 +1523,7 @@ class InferencePipeline:
                 "label": decision.get("label", label),
                 "confidence": float(decision.get("confidence", conf)),
                 "probs": probs,
+                "uncertainty": uncertainty,  # Prediction uncertainty [0-1] (Shannon entropy)
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
                 "kps": kps,
                 "kps_3d": kps_3d,  # 3D keypoints (Phase 2)
@@ -1250,7 +1532,9 @@ class InferencePipeline:
                 "features": feat.tolist() if feat is not None else None,
                 "fps": round(self.fps, 2),
                 "posture_state": posture_state,  # Instant posture classification
+                "posture_confidence": posture_confidence,  # Posture confidence (decoupled from detector)
                 "posture_analysis": posture_analysis,  # Full posture metrics
+                "support_surface": support_surface_info,  # Support surface detection info
                 "activity_state": activity_state,  # Activity classification (all 53 activities)
                 "activity_confidence": activity_confidence,  # Activity confidence
                 "activity_priority": activity_priority,  # Activity priority (CRITICAL, HIGH, NORMAL, MEDIUM)
@@ -1273,6 +1557,7 @@ class InferencePipeline:
                 "frame_visibility": frame_visibility,  # Frame visibility analysis
                 "movement_features": movement_features,  # Motion energy, jerk index
                 "clinical_correlation": clinical_correlation,  # Pain, agitation, dizziness scores
+                "clinical_alerts": clinical_alerts,  # Bed exit, fall risk, immobility alerts
                 "baseline_info": baseline_info,  # DBSCAN + PCA patient baseline anomaly info
             }
             
@@ -1316,26 +1601,44 @@ class InferencePipeline:
                 if distance_feedback:
                     frame_vis = self.display.draw_distance_feedback(frame_vis, distance_feedback)
                 
-                # Draw posture with timestamp (prominent display)
+                # Draw posture with timestamp and support surface (prominent display)
                 current_timestamp = result.get("ts", time.time())
-                posture_confidence = posture_analysis.get("confidence", 0.0) if posture_analysis else None
-                frame_vis = self.display.draw_posture_with_timestamp(
-                    frame_vis, 
-                    posture_state=posture_state,
-                    timestamp=current_timestamp,
-                    posture_confidence=posture_confidence
+                display_posture_conf = posture_confidence if posture_confidence > 0 else (
+                    posture_analysis.get("confidence", 0.0) if posture_analysis else None
                 )
+                # Include subtype if available (e.g., "SITTING (leaning_back)")
+                display_posture_state = posture_state
+                if posture_analysis and posture_analysis.get("subtype"):
+                    display_posture_state = f"{posture_state} ({posture_analysis['subtype']})"
+
+                frame_vis = self.display.draw_posture_with_timestamp(
+                    frame_vis,
+                    posture_state=display_posture_state,
+                    timestamp=current_timestamp,
+                    posture_confidence=display_posture_conf
+                )
+
+                # Draw support surface info if detected
+                if support_surface_info and support_surface_info.get("surface_id"):
+                    support_text = f"Support: {support_surface_info.get('support', 'detected')}"
+                    try:
+                        self.display.draw_text(frame_vis, support_text, (10, 120),
+                                              color=(0, 200, 255), scale=0.6)
+                    except Exception:
+                        pass  # Display method may not support this
                 
                 # Draw metrics including instant posture classification
                 metrics = {
                     "FPS": round(self.fps, 1),
                     "Activity": decision["label"],
-                    "Posture": posture_state,  # Instant posture classification
-                    "Conf": round(decision.get("confidence", conf), 2),
+                    "Posture": display_posture_state,  # Posture with subtype
+                    "P.Conf": round(posture_confidence, 2) if posture_confidence > 0 else round(decision.get("confidence", conf), 2),
                     "Latency(ms)": round(inference_ms, 1)
                 }
                 if track_id is not None:
                     metrics["Track ID"] = track_id
+                if support_surface_info and support_surface_info.get("surface_id"):
+                    metrics["Support"] = support_surface_info.get("surface_type", "detected")
                 if distance_info:
                     metrics["Distance"] = f"{distance_info.get('distance_cm', 0)}cm"
                 frame_vis = self.display.draw_metrics(frame_vis, metrics)
