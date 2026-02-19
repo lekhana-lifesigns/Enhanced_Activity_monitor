@@ -46,23 +46,34 @@ class TemporalModel:
                 log.exception("Failed to load temporal model")
                 self.interpreter = None
 
+    @staticmethod
+    def _compute_uncertainty(probs, num_classes):
+        """Compute normalized Shannon entropy as uncertainty measure."""
+        probs_arr = np.array(probs, dtype=np.float64)
+        probs_arr = np.clip(probs_arr, 1e-10, 1.0)
+        entropy = -np.sum(probs_arr * np.log(probs_arr))
+        max_entropy = np.log(num_classes)
+        if max_entropy < 1e-10:
+            return 0.0
+        return float(np.clip(entropy / max_entropy, 0.0, 1.0))
+
     def predict(self, feat_window, use_smoothing=True, alpha=0.7):
         """
         Predict activity class from feature window.
-        
+
         Args:
             feat_window: np.array (T,F) - feature sequence
             use_smoothing: Whether to apply exponential moving average
             alpha: Smoothing factor (0-1), higher = more weight to current prediction
-        
+
         Returns:
-            (label, confidence, probs) tuple
+            (label, confidence, probs, uncertainty) tuple
         """
         # feat_window: np.array (T,F)
         if self.interpreter is None:
             default_probs = [1.0] + [0.0] * (len(self.labels) - 1)
-            return ("calm", 1.0, default_probs)
-        
+            return ("calm", 1.0, default_probs, 0.0)
+
         x = np.asarray(feat_window, dtype=self.input_details[0]['dtype'])
         if x.ndim == 2:
             x = np.expand_dims(x, 0)   # (1,T,F)
@@ -70,7 +81,7 @@ class TemporalModel:
         self.interpreter.invoke()
         out = self.interpreter.get_tensor(self.output_details[0]['index'])
         probs = out[0].tolist()
-        
+
         # Apply smoothing if enabled
         if use_smoothing and self.prev_probs is not None:
             probs = [
@@ -81,8 +92,9 @@ class TemporalModel:
             total = sum(probs)
             if total > 0:
                 probs = [p / total for p in probs]
-        
+
         self.prev_probs = probs
-        
+
         idx = int(np.argmax(probs))
-        return (self.labels[idx], float(probs[idx]), probs)
+        uncertainty = self._compute_uncertainty(probs, len(self.labels))
+        return (self.labels[idx], float(probs[idx]), probs, uncertainty)
