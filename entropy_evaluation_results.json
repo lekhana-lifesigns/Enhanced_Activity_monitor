@@ -1,0 +1,201 @@
+{
+  "timestamp": 1767170886.1421056,
+  "results": {
+    "resting": {
+      "fuzzy": {
+        "mean_entropy": 1.277602450738339,
+        "std_entropy": 0.0066301089379981895,
+        "n_sequences": 5,
+        "individual_entropies": [
+          1.273957447551153,
+          1.2761355634144973,
+          1.2678859371063518,
+          1.2849813390853428,
+          1.285051966534351
+        ]
+      },
+      "sample": {
+        "mean_entropy": 2.5426213284007266,
+        "std_entropy": 0.021827342056092297,
+        "n_sequences": 5,
+        "individual_entropies": [
+          2.5564773026619503,
+          2.5423138676378363,
+          2.5051964837274956,
+          2.5704406645577165,
+          2.5386783234186354
+        ]
+      },
+      "perm": {
+        "mean_entropy": 0.9898451695956151,
+        "std_entropy": 0.0011632385567995585,
+        "n_sequences": 5,
+        "individual_entropies": [
+          0.9904291217679612,
+          0.9903684819974043,
+          0.9879349167405915,
+          0.9912905273839856,
+          0.9892028000881332
+        ]
+      }
+    },
+    "walking": {
+      "fuzzy": {
+        "mean_entropy": 0.9671264686379925,
+        "std_entropy": 0.07515637463215187,
+        "n_sequences": 5,
+        "individual_entropies": [
+          1.1087368559813098,
+          0.9369663856333369,
+          0.9006466507117569,
+          0.9142394794845546,
+          0.9750429713790036
+        ]
+      },
+      "sample": {
+        "mean_entropy": 1.9602809973613968,
+        "std_entropy": 0.14405062152385878,
+        "n_sequences": 5,
+        "individual_entropies": [
+          2.233063584143075,
+          1.9396090032617967,
+          1.8236491632179035,
+          1.8602373223440898,
+          1.9448459138401195
+        ]
+      },
+      "perm": {
+        "mean_entropy": 0.8901393067285447,
+        "std_entropy": 0.012880941316623571,
+        "n_sequences": 5,
+        "individual_entropies": [
+          0.9134667878568423,
+          0.8824888781973393,
+          0.8756368213742176,
+          0.8867341402180964,
+          0.8923699059962277
+        ]
+      }
+    },
+    "agitated": {
+      "fuzzy": {
+        "mean_entropy": 1.263344386451914,
+        "std_entropy": 0.013729997604114046,
+        "n_sequences": 5,
+        "individual_entropies": [
+          1.279555965216384,
+          1.2441112788363027,
+          1.2776074649383673,
+          1.253075233990269,
+          1.2623719892782477
+        ]
+      },
+      "sample": {
+        "mean_entropy": 2.4812466436096123,
+        "std_entropy": 0.01752578179079248,
+        "n_sequences": 5,
+        "individual_entropies": [
+          2.460967930512556,
+          2.5070308372448635,
+          2.4967204222695054,
+          2.470431586342826,
+          2.4710824416783104
+        ]
+      },
+      "perm": {
+        "mean_entropy": 0.990594082756607,
+        "std_entropy": 0.0024262195608284257,
+        "n_sequences": 5,
+        "individual_entropies": [
+          0.9931723483509605,
+          0.9899178281463739,
+          0.9885719886365031,
+          0.9936733840354807,
+          0.9876348646137165
+        ]
+      }
+    },
+    "falling": {
+      "fuzzy": {
+        "mean_entropy": 0.2674181626626149,
+        "std_entropy": 0.05384804762880254,
+        "n_sequences": 5,
+        "individual_entropies": [
+          0.22589942183475548,
+          0.32507731789319305,
+          0.1831321616162363,
+          0.3049287374958017,
+          0.298053174473088
+        ]
+      },
+      "sample": {
+        "mean_entropy": 0.8617628289128396,
+        "std_entropy": 0.14511680788351847,
+        "n_sequences": 5,
+        "individual_entropies": [
+          0.7854495338511089,
+          1.0110262584056482,
+          0.6147761882559325,
+          0.9716327324228908,
+          0.9259294316286176
+        ]
+      },
+      "perm": {
+        "mean_entropy": 0.9764865056243733,
+        "std_entropy": 0.002285806563501655,
+        "n_sequences": 5,
+        "individual_entropies": [
+          0.9725706726527215,
+          0.9789333111440792,
+          0.9760575712458455,
+          0.9786226762589783,
+          0.9762482968202422
+        ]
+      }
+    }
+  },
+  "discriminability": {
+    "fuzzy": {
+      "fisher_ratio": 76.48360392587382,
+      "between_var": 0.1678922959530993,
+      "within_var": 0.002195141015005212
+    },
+    "sample": {
+      "fisher_ratio": 42.66568540651123,
+      "between_var": 0.454315475339755,
+      "within_var": 0.010648263845081034
+    },
+    "perm": {
+      "fisher_ratio": 39.05397803198634,
+      "between_var": 0.0017416436487895114,
+      "within_var": 4.4595806536354754e-05
+    }
+  },
+  "recommendations": {
+    "best_method": "fuzzy",
+    "activity_ranking": [
+      [
+        "falling",
+        0.2674181626626149
+      ],
+      [
+        "walking",
+        0.9671264686379925
+      ],
+      [
+        "agitated",
+        1.263344386451914
+      ],
+      [
+        "resting",
+        1.277602450738339
+      ]
+    ],
+    "clinical_thresholds": {
+      "low_complexity": 0.3,
+      "medium_complexity": 0.4,
+      "high_complexity": 0.7
+    }
+  },
+  "paper_table": "\n\\begin{table}[h]\n\\centering\n\\caption{Entropy-Based Activity Classification Performance}\n\\label{tab:entropy_evaluation}\n\\begin{tabular}{@{}lccc@{}}\n\\toprule\nActivity & Fuzzy Entropy & Sample Entropy & Permutation Entropy \\\\\n\\midrule\nResting & 1.278 & 2.543 & 0.990 \\\\\nWalking & 0.967 & 1.960 & 0.890 \\\\\nAgitated & 1.263 & 2.481 & 0.991 \\\\\nFalling & 0.267 & 0.862 & 0.976 \\\\\n\\midrule\nDiscriminability (Fisher) & .2f & .2f & .2f \\\\\n\\bottomrule\n\\end{tabular}\n\\end{table}\n"
+}

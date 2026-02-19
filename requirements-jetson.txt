@@ -1,0 +1,47 @@
+# Enhanced Activity Monitor - Jetson Orin Nano Edge Deployment
+# ============================================================
+# NOTE: PyTorch + torchvision are PRE-INSTALLED in the L4T container
+#       (nvcr.io/nvidia/l4t-pytorch:r36.4.0-pth2.5-py3)
+#       Do NOT install them from pip — it will break CUDA support.
+#
+# Install: pip install --no-cache-dir -r requirements-jetson.txt
+
+# Core
+numpy>=1.21.0
+opencv-python>=4.5.0
+Pillow>=10.2.0
+pyyaml>=5.4.0
+
+# YOLO inference (handles detection, pose, segmentation)
+ultralytics>=8.0.0
+
+# MQTT telemetry
+paho-mqtt>=1.6.1
+
+# System monitoring
+psutil>=5.8.0
+
+# Security (encryption for local DB, TLS support)
+cryptography>=3.4.8
+
+# Pose smoothing
+filterpy>=1.4.5
+
+# Data processing (used by analytics modules)
+scipy>=1.7.0
+
+# --- OPTIONAL: Enable only if needed on edge ---
+
+# Face recognition (requires ~200MB, enable if use_face_recognition: true)
+# deepface>=0.0.79
+
+# Dashboard (enable if running clinical dashboard on Jetson)
+# flask>=2.0.0
+# flask-socketio>=5.0.0
+
+# Async DB (enable if using AsyncLocalDB)
+# aiosqlite>=0.17.0
+
+# --- NOT NEEDED ON EDGE (training/dataset tools) ---
+# pandas, duckdb, datasets, huggingface-hub, tensorflow, tf-keras
+# These are for training notebooks and dataset creation only.

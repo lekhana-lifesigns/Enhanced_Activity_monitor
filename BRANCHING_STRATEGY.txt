@@ -1,0 +1,64 @@
+# Feature Branch Deployment Strategy
+
+## Branch Structure
+
+### Main Branches
+- main: Production-ready code (stable, tested)
+
+### Feature Branches (from main)
+1. feature/detection-tracking
+   - Components: pipeline/detectors/, YOLO11, tracking
+   - TODOs: ROI processing, quantization, batch processing
+
+2. feature/pose-3d-kinematics
+   - Components: 3D pose, forward kinematics, SC3D
+   - TODOs: Conditional 3D lifting, SC3D model integration
+
+3. feature/activity-classification
+   - Components: Enhanced classifier, 53 activities
+   - TODOs: YOLO optimization, early exit
+
+4. feature/clinical-analytics
+   - Components: Clinical correlation, compliance, emotion
+   - TODOs: Patient-specific adaptation, interpretability
+
+5. feature/patient-management
+   - Components: Face recognition, tracking, bed detection
+   - TODOs: Patient-specific models
+
+6. feature/performance-optimization
+   - Components: Caching, async, parallel processing
+   - TODOs: Multiple performance improvements
+
+7. feature/security-compliance
+   - Components: Camera security, encryption, audit
+   - TODOs: Enhanced security features
+
+8. feature/dashboard-reporting
+   - Components: Web dashboard, reporting, MQTT
+   - TODOs: Dashboard enhancements
+
+9. feature/infrastructure
+   - Components: Database, config, utilities
+   - TODOs: Infrastructure improvements
+
+## Deployment Workflow
+
+1. Work on features in their respective branches
+2. Test independently per feature
+3. Merge to main when complete
+4. Deploy features independently via feature flags
+
+## Feature Flags (config/system.yaml)
+
+features:
+  detection_tracking: true
+  pose_3d_kinematics: true
+  activity_classification: true
+  clinical_analytics: true
+  patient_management: true
+  performance_optimization: true
+  security_compliance: true
+  dashboard_reporting: true
+
+

@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patient Dashboard - Enhanced Activity Monitor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f7fa;
+            color: #333;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .header h1 {
+            font-size: 1.5rem;
+        }
+        .logout-btn {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.3s;
+        }
+        .logout-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        .container {
+            max-width: 1200px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+        }
+        .welcome-section {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .card h3 {
+            color: #667eea;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .activity-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .activity-item {
+            padding: 0.75rem;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+        .activity-time {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        .activity-type {
+            font-weight: bold;
+            color: #333;
+        }
+        .confidence {
+            font-size: 0.8rem;
+            color: #666;
+        }
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: background 0.3s;
+        }
+        .btn:hover {
+            background: #5a6fd8;
+        }
+        .btn-danger {
+            background: #dc3545;
+        }
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        .actions-section {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        .consent-section {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .consent-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 0;
+            border-bottom: 1px solid #eee;
+        }
+        .consent-item:last-child {
+            border-bottom: none;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #667eea;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        .modal-content {
+            background-color: white;
+            margin: 15% auto;
+            padding: 2rem;
+            border-radius: 10px;
+            width: 80%;
+            max-width: 500px;
+        }
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .close:hover {
+            color: #333;
+        }
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🩺 Patient Health Dashboard</h1>
+        <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+    </div>
+
+    <div class="container">
+        <div class="welcome-section">
+            <h2>Welcome to Your Health Dashboard</h2>
+            <p>Patient ID: <strong>{{ patient_id }}</strong></p>
+            <p>Access and manage your activity monitoring data securely and privately.</p>
+        </div>
+
+        <div class="dashboard-grid">
+            <div class="card">
+                <h3>📊 Recent Activities</h3>
+                <div id="activity-list" class="activity-list">
+                    <div class="loading">Loading activities...</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>⚙️ Data Management</h3>
+                <div class="actions-section">
+                    <button id="export-btn" class="btn">📥 Export Data</button>
+                    <button id="delete-btn" class="btn btn-danger">🗑️ Request Deletion</button>
+                </div>
+                <p style="margin-top: 1rem; font-size: 0.9rem; color: #666;">
+                    Export your data for portability or request complete deletion of your health records.
+                </p>
+            </div>
+        </div>
+
+        <div class="consent-section">
+            <h3>🔒 Privacy & Consent Settings</h3>
+            <p style="margin-bottom: 1.5rem; color: #666;">
+                Control how your health data is collected and used. These settings comply with HIPAA and GDPR regulations.
+            </p>
+
+            <div class="consent-item">
+                <div>
+                    <strong>Data Collection</strong>
+                    <p style="margin: 0.25rem 0; font-size: 0.9rem; color: #666;">
+                        Allow collection of activity and posture data for health monitoring.
+                    </p>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="consent-data-collection" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="consent-item">
+                <div>
+                    <strong>Analytics Sharing</strong>
+                    <p style="margin: 0.25rem 0; font-size: 0.9rem; color: #666;">
+                        Share anonymized data for research and system improvement.
+                    </p>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="consent-analytics">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="consent-item">
+                <div>
+                    <strong>Emergency Alerts</strong>
+                    <p style="margin: 0.25rem 0; font-size: 0.9rem; color: #666;">
+                        Receive alerts for potential health emergencies.
+                    </p>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="consent-emergency" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <button id="update-consent-btn" class="btn" style="margin-top: 1.5rem;">Update Preferences</button>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="delete-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('delete-modal')">&times;</span>
+            <h3>🗑️ Request Data Deletion</h3>
+            <p>Are you sure you want to request deletion of all your health data? This action cannot be undone.</p>
+            <textarea id="deletion-reason" placeholder="Please provide a reason for deletion (optional)" rows="3" style="width: 100%; margin: 1rem 0; padding: 0.5rem; border: 1px solid #ddd; border-radius: 5px;"></textarea>
+            <button id="confirm-delete-btn" class="btn btn-danger">Confirm Deletion Request</button>
+        </div>
+    </div>
+
+    <script>
+        // Load activities on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadActivities();
+            loadConsentSettings();
+        });
+
+        // Activity loading
+        function loadActivities() {
+            fetch('/api/data?days=7')
+                .then(response => response.json())
+                .then(data => {
+                    const activityList = document.getElementById('activity-list');
+                    if (data.error) {
+                        activityList.innerHTML = '<p style="color: #c33;">Error loading activities</p>';
+                        return;
+                    }
+
+                    if (data.data.length === 0) {
+                        activityList.innerHTML = '<p style="color: #666;">No recent activities found</p>';
+                        return;
+                    }
+
+                    activityList.innerHTML = data.data.map(activity => `
+                        <div class="activity-item">
+                            <div>
+                                <div class="activity-type">${activity.activity}</div>
+                                <div class="activity-time">${new Date(activity.timestamp * 1000).toLocaleString()}</div>
+                            </div>
+                            <div class="confidence">${Math.round(activity.confidence * 100)}%</div>
+                        </div>
+                    `).join('');
+                })
+                .catch(error => {
+                    console.error('Error loading activities:', error);
+                    document.getElementById('activity-list').innerHTML = '<p style="color: #c33;">Error loading activities</p>';
+                });
+        }
+
+        // Consent management
+        function loadConsentSettings() {
+            fetch('/api/consent')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('consent-data-collection').checked = data.data_collection;
+                    document.getElementById('consent-analytics').checked = data.analytics_sharing;
+                    document.getElementById('consent-emergency').checked = data.emergency_alerts;
+                })
+                .catch(error => console.error('Error loading consent:', error));
+        }
+
+        // Update consent
+        document.getElementById('update-consent-btn').addEventListener('click', function() {
+            const consentData = {
+                data_collection: document.getElementById('consent-data-collection').checked,
+                analytics_sharing: document.getElementById('consent-analytics').checked,
+                emergency_alerts: document.getElementById('consent-emergency').checked
+            };
+
+            fetch('/api/consent', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(consentData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert('Consent preferences updated successfully!');
+            })
+            .catch(error => {
+                console.error('Error updating consent:', error);
+                alert('Error updating preferences. Please try again.');
+            });
+        });
+
+        // Export data
+        document.getElementById('export-btn').addEventListener('click', function() {
+            fetch('/api/export')
+                .then(response => response.json())
+                .then(data => {
+                    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `health_data_${data.patient_id}_${new Date().toISOString().split('T')[0]}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                })
+                .catch(error => {
+                    console.error('Error exporting data:', error);
+                    alert('Error exporting data. Please try again.');
+                });
+        });
+
+        // Delete data modal
+        document.getElementById('delete-btn').addEventListener('click', function() {
+            document.getElementById('delete-modal').style.display = 'block';
+        });
+
+        document.getElementById('confirm-delete-btn').addEventListener('click', function() {
+            const reason = document.getElementById('deletion-reason').value;
+
+            fetch('/api/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({reason: reason})
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert('Deletion request submitted. Your data will be removed within 30 days.');
+                closeModal('delete-modal');
+            })
+            .catch(error => {
+                console.error('Error requesting deletion:', error);
+                alert('Error submitting deletion request. Please try again.');
+            });
+        });
+
+        // Modal functions
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modals = document.getElementsByClassName('modal');
+            for (let modal of modals) {
+                if (event.target == modal) {
+                    modal.style.display = 'none';
+                }
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# config/capture.yaml - Configuration for Raspberry Pi capture nodes
+node_id: "pi_01"  # Unique identifier for this Pi node
+
+camera:
+  index: 0  # Camera index (0 for default camera)
+  resolution: [640, 360]  # Lower resolution for efficient streaming
+  fps: 15  # Target frame rate
+
+zmq:
+  bind_address: "tcp://*:5555"  # Address to bind the publisher socket (can also use 'port' key)
+  # Alternatively, specify just the port:
+  # port: 5555
+
+# Motion detection and gating for bandwidth optimization
+motion_detection:
+  enabled: false  # Enable motion-based frame gating
+  threshold: 0.02  # Motion threshold (0.0-1.0, higher = less sensitive)
+  min_area: 500  # Minimum contour area to consider as motion
+  blur_size: 21  # Gaussian blur size for noise reduction
+  dilate_iterations: 2  # Morphological operations for noise reduction
+
+# Feature extraction mode (send keypoints instead of frames)
+feature_mode:
+  enabled: false  # Send pose features instead of full frames
+  model_path: "models/yolo11n-pose.pt"  # Path to pose model
+  confidence_threshold: 0.5  # Detection confidence threshold
+
+# Optional face blurring for privacy
+enable_privacy_blur: false

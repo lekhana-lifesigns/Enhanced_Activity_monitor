@@ -1,0 +1,44 @@
+[Unit]
+Description=Enhanced Activity Monitor - Bed %i
+After=network-online.target mosquitto.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=eam
+Group=eam
+WorkingDirectory=/opt/eam
+EnvironmentFile=/opt/eam/.env
+
+# %i is the bed/camera instance (e.g., eam@bed01.service)
+# Camera index derived from instance name via config override
+ExecStart=/opt/eam/venv/bin/python eac.py \
+    --device-id %i \
+    --config config/system.yaml \
+    --mqtt-config config/mqtt.yaml
+
+Restart=on-failure
+RestartSec=10
+WatchdogSec=120
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+CPUQuota=80%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/eam/storage /opt/eam/logs
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eam-%i
+
+[Install]
+WantedBy=multi-user.target

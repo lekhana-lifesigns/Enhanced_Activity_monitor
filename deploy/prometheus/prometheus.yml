@@ -1,0 +1,59 @@
+# Enhanced Activity Monitor - Prometheus Configuration
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'eam-monitor'
+
+# Alertmanager configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Rule files
+# rule_files:
+#   - "alert_rules.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # EAM API Backend
+  - job_name: 'eam-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['api:8000']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'eam-api'
+
+  # Redis metrics (if redis-exporter is added)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']
+
+  # PostgreSQL metrics (if postgres-exporter is added)
+  # - job_name: 'postgres'
+  #   static_configs:
+  #     - targets: ['postgres-exporter:9187']
+
+  # Nginx metrics (if nginx-exporter is added)
+  # - job_name: 'nginx'
+  #   static_configs:
+  #     - targets: ['nginx-exporter:9113']
+
+  # Edge devices (dynamic discovery can be added)
+  # - job_name: 'edge-devices'
+  #   file_sd_configs:
+  #     - files:
+  #         - '/etc/prometheus/edge_devices.json'
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       target_label: device_id

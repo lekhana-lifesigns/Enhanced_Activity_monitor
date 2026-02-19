@@ -1,0 +1,17 @@
+.git
+.github
+.claude
+.venv
+__pycache__
+*.pyc
+*.pyo
+runs/
+training_data/
+training/notebooks/*.pt
+*.egg-info
+.env
+nul
+validation_results/
+entropy_evaluation_results.json
+BUGS_AND_ISSUES.txt
+BRANCHING_STRATEGY.txt

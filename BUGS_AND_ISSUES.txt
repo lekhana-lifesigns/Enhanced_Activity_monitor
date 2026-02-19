@@ -1,0 +1,56 @@
+# Critical Issues Found in Codebase Review
+
+## 🔴 CRITICAL - Fix Immediately
+
+### 1. ThreadPoolExecutor Resource Leak (eac.py:75)
+- Executor created but may not shutdown on crashes
+- Fix: Add shutdown in signal handlers and exception paths
+
+### 2. Pose Caching Dead Code (inference_pipeline.py:582-585)
+- Dead code block that does nothing (pass statement)
+- Fix: Remove or implement intended logic
+
+### 3. Hash Collision Risk (inference_pipeline.py:577,603,615)
+- Using Python hash() on crop bytes can collide
+- Fix: Use hashlib.md5 or compare actual pose change
+
+## 🟡 HIGH PRIORITY
+
+### 4. Race Condition in Async Tasks (eac.py:203)
+- executor.submit() can queue unbounded tasks
+- Fix: Add backpressure/queue size limit
+
+### 5. Missing Config Validation
+- No validation of config values (negative, out-of-range)
+- Fix: Add config validator in InferencePipeline.__init__()
+
+### 6. Incomplete Error Handling
+- Many except blocks only log, no recovery
+- Fix: Add fallback logic or specific exceptions
+
+### 7. ThreadPoolExecutor Not Shut Down (parallel_processor.py:34)
+- Executor may leak if object garbage collected
+- Fix: Use context manager or __del__ shutdown
+
+## 🟢 MEDIUM PRIORITY
+
+### 8. Missing Type Hints
+- Many functions lack type hints
+- Fix: Add gradually, starting with public APIs
+
+### 9. Inconsistent Logging Levels
+- Mixed debug/info/warning without strategy
+- Fix: Define logging strategy
+
+### 10. Missing Input Validation
+- classify_activity() doesn't validate inputs
+- Fix: Add validation at function entry points
+
+### 11. Hardcoded Magic Numbers
+- Magic numbers without constants (1000, 0.7, etc.)
+- Fix: Extract to named constants
+
+## Detailed Analysis
+
+See full ISSUES.md for detailed analysis, code examples, and recommendations.
+

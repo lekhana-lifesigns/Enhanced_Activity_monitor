@@ -1,0 +1,68 @@
+{
+  "geometric": {
+    "method": "geometric",
+    "scenarios": [
+      {
+        "name": "normal_standing",
+        "success": true,
+        "latency_ms": 0.0,
+        "accuracy_score": 0.0,
+        "expected_accuracy": 0.95
+      },
+      {
+        "name": "upper_limb_reach",
+        "success": true,
+        "latency_ms": 0.0,
+        "accuracy_score": 0.0,
+        "expected_accuracy": 0.88
+      },
+      {
+        "name": "abnormal_gait",
+        "success": true,
+        "latency_ms": 0.0,
+        "accuracy_score": 0.0,
+        "expected_accuracy": 0.0
+      }
+    ],
+    "performance_metrics": {
+      "avg_accuracy": 0.0,
+      "avg_latency_ms": 0.0,
+      "success_rate": 1.0
+    }
+  },
+  "kinematic": {
+    "method": "kinematic",
+    "scenarios": [
+      {
+        "name": "normal_standing",
+        "success": true,
+        "latency_ms": 0.0,
+        "accuracy_score": 0.0,
+        "expected_accuracy": 0.95
+      },
+      {
+        "name": "upper_limb_reach",
+        "success": true,
+        "latency_ms": 0.0,
+        "accuracy_score": 0.0,
+        "expected_accuracy": 0.88
+      },
+      {
+        "name": "abnormal_gait",
+        "success": true,
+        "latency_ms": 0.0,
+        "accuracy_score": 0.0,
+        "expected_accuracy": 0.0
+      }
+    ],
+    "performance_metrics": {
+      "avg_accuracy": 0.0,
+      "avg_latency_ms": 0.0,
+      "success_rate": 1.0
+    }
+  },
+  "smplx": {
+    "method": "smplx",
+    "error": "SMPL-X model not found at C:\\WorkSpace\\Enhanced_Activity_monitor\\pipeline\\pose\\models\\smplx\\SMPLX_NEUTRAL.pkl"
+  }
+}

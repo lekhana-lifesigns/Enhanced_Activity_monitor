@@ -1,0 +1,73 @@
+<!--
+  Label Studio Configuration for EAM Temporal Activity Annotation
+
+  Setup:
+    1. Install Label Studio: pip install label-studio
+    2. Start: label-studio start
+    3. Create project → Import this XML as labeling interface
+    4. Import videos from clinical_validation_data/
+    5. Annotators label temporal segments on the video timeline
+
+  This config creates a video timeline annotation interface where
+  annotators mark start/end times for each activity class.
+-->
+<View>
+  <Header value="EAM Temporal Activity Annotation"/>
+  <Header value="Label the DOMINANT activity for each 3-second segment. See guidelines below." size="4"/>
+
+  <!-- Video player with timeline -->
+  <Video name="video" value="$video_url" frameRate="15"/>
+
+  <!-- Temporal labels on video timeline -->
+  <VideoRectangle name="activity_segments" toName="video" showInline="true">
+    <Labels name="temporal_labels" toName="video">
+      <!-- Posture: Low urgency (blues/greens) -->
+      <Label value="lying_still" background="#2196F3" hotkey="0"/>
+      <Label value="lying_restless" background="#FF9800" hotkey="1"/>
+      <Label value="turning_in_bed" background="#9C27B0" hotkey="2"/>
+      <Label value="sitting_stable" background="#4CAF50" hotkey="3"/>
+      <Label value="sitting_unstable" background="#FFC107" hotkey="4"/>
+
+      <!-- Transitions/Movement: Medium urgency -->
+      <Label value="bed_exit" background="#F44336" hotkey="5"/>
+      <Label value="standing" background="#00BCD4" hotkey="6"/>
+      <Label value="walking" background="#009688" hotkey="7"/>
+
+      <!-- Critical: High urgency (reds) -->
+      <Label value="agitated" background="#E91E63" hotkey="8"/>
+      <Label value="convulsive" background="#D50000" hotkey="9"/>
+      <Label value="fallen" background="#B71C1C" hotkey="f"/>
+
+      <!-- Meta -->
+      <Label value="occluded" background="#9E9E9E" hotkey="o"/>
+    </Labels>
+  </VideoRectangle>
+
+  <!-- Annotator confidence per segment -->
+  <Choices name="confidence" toName="video" perRegion="true" required="false">
+    <Choice value="high_confidence" alias="Confident in this label"/>
+    <Choice value="medium_confidence" alias="Somewhat uncertain"/>
+    <Choice value="low_confidence" alias="Very uncertain - needs review"/>
+  </Choices>
+
+  <!-- Optional notes -->
+  <TextArea name="notes" toName="video" perRegion="true" required="false"
+            placeholder="Optional: describe what you see or why you chose this label"/>
+
+  <!-- Quick reference guidelines -->
+  <View style="margin-top: 20px; padding: 10px; background: #f5f5f5; border-radius: 4px;">
+    <Header value="Quick Reference" size="4"/>
+    <Text name="guidelines" value="
+PRIORITY RULE: When uncertain, prefer the higher-urgency label.
+Priority: convulsive > fallen > agitated > bed_exit > sitting_unstable > others
+
+KEY DISTINCTIONS:
+- lying_still vs lying_restless: ANY limb movement → restless
+- lying_restless vs turning_in_bed: Full torso rotation → turning
+- sitting_stable vs sitting_unstable: Any visible sway → unstable
+- agitated vs convulsive: Irregular/voluntary → agitated. Rhythmic/involuntary → convulsive
+- bed_exit: Include the FULL attempt (approach edge → legs over → weight shift)
+- occluded: ONLY if you genuinely cannot determine the activity
+    "/>
+  </View>
+</View>

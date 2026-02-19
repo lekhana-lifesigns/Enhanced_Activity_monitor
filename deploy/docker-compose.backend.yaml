@@ -1,0 +1,193 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # API Backend
+  # ============================================
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    container_name: eam-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - DATABASE_URL=postgresql+asyncpg://eam:${POSTGRES_PASSWORD}@postgres:5432/eam
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - MQTT_BROKER=mqtt
+      - MQTT_PORT=1883
+      - SECRET_KEY=${SECRET_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - eam-network
+    volumes:
+      - api-logs:/app/logs
+
+  # ============================================
+  # PostgreSQL Database
+  # ============================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: eam-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=eam
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=eam
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eam -d eam"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eam-network
+    ports:
+      - "5432:5432"
+
+  # ============================================
+  # Redis (Caching & Rate Limiting)
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: eam-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eam-network
+    ports:
+      - "6379:6379"
+
+  # ============================================
+  # MQTT Broker (Eclipse Mosquitto)
+  # ============================================
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: eam-mqtt
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/password.txt:/mosquitto/config/password.txt:ro
+      - mqtt-data:/mosquitto/data
+      - mqtt-logs:/mosquitto/log
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - eam-network
+
+  # ============================================
+  # Nginx API Gateway
+  # ============================================
+  nginx:
+    image: nginx:alpine
+    container_name: eam-gateway
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - eam-network
+
+  # ============================================
+  # Prometheus (Metrics Collection)
+  # ============================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: eam-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - eam-network
+
+  # ============================================
+  # Grafana (Dashboards)
+  # ============================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: eam-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - eam-network
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  eam-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  postgres-data:
+  redis-data:
+  mqtt-data:
+  mqtt-logs:
+  api-logs:
+  nginx-logs:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,384 @@
+# temporal_annotation_schema.yaml
+# Defines the 12-class temporal activity annotation schema for EAM
+# This schema is the single source of truth for:
+#   - Label Studio / CVAT annotation configuration
+#   - Training data export
+#   - Model output mapping
+#   - Clinical alert mapping
+
+# ============================================================
+# SCHEMA VERSION (increment on any class change)
+# ============================================================
+schema_version: "1.0.0"
+created: "2026-01-23"
+project: "Enhanced Activity Monitor - Temporal Classification"
+
+# ============================================================
+# TEMPORAL WINDOW CONFIGURATION
+# Must match TemporalModel.window_size and camera FPS
+# ============================================================
+temporal:
+  camera_fps: 15
+  window_size_frames: 48        # 3.2 seconds per window
+  window_stride_frames: 8       # 0.53s stride → overlapping windows for training
+  annotation_resolution_sec: 3.0  # Annotators label every 3 seconds (close to window_size)
+  min_segment_duration_sec: 1.5   # Minimum segment length (< this gets merged with neighbor)
+
+# ============================================================
+# CLASS DEFINITIONS (12 classes, mutually exclusive)
+# ============================================================
+classes:
+  - id: 0
+    name: "lying_still"
+    short: "LYS"
+    color: "#2196F3"  # Blue
+    description: "Patient is horizontal with minimal movement"
+    detection_type: "static"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Body is horizontal (spine angle < 30 deg from horizontal)"
+      - "Motion energy near zero (limbs not moving)"
+      - "Stable keypoint positions across the window"
+    disambiguation:
+      from_lying_restless: "If ANY limb moves > ~5cm equivalent, use lying_restless"
+      from_occluded: "If >= 8 keypoints visible at conf > 0.3, label activity not occluded"
+    annotation_notes: "Default label for sleeping patients. Blanket movement from breathing is still lying_still."
+
+  - id: 1
+    name: "lying_restless"
+    short: "LYR"
+    color: "#FF9800"  # Orange
+    description: "Patient is horizontal but with intermittent limb/body movement"
+    detection_type: "dynamic"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Body horizontal but limbs moving intermittently"
+      - "Small positional shifts, fidgeting, leg movements"
+      - "NOT full body rotation (that is turning_in_bed)"
+    disambiguation:
+      from_lying_still: "Any visible limb movement beyond breathing → lying_restless"
+      from_turning_in_bed: "Full torso rotation or lateral shift > 30cm → turning_in_bed"
+      from_agitated: "Sustained high-energy thrashing → agitated (not just occasional fidgeting)"
+    annotation_notes: "Includes: foot tapping, arm repositioning, small leg lifts while lying down."
+
+  - id: 2
+    name: "turning_in_bed"
+    short: "TIB"
+    color: "#9C27B0"  # Purple
+    description: "Patient is rotating or repositioning significantly while in bed"
+    detection_type: "transitional"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Torso rotates laterally (supine→side, side→prone, etc.)"
+      - "Hips and shoulders shift > ~30cm laterally"
+      - "Duration: typically 2-10 seconds per turn"
+    disambiguation:
+      from_lying_restless: "Must involve torso rotation, not just limb movement"
+      from_bed_exit: "If legs go over bed edge → bed_exit, not turning"
+    annotation_notes: "Label the full turn duration. If patient turns and settles, switch to lying_still/lying_restless after settling."
+
+  - id: 3
+    name: "sitting_stable"
+    short: "SIS"
+    color: "#4CAF50"  # Green
+    description: "Patient upright in seated position with stable posture"
+    detection_type: "static"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Torso upright (spine angle > 45 deg from horizontal)"
+      - "Hips and knees bent (seated geometry)"
+      - "Minimal sway (COM stays within ~5cm)"
+    disambiguation:
+      from_sitting_unstable: "Visible sway, rocking, or balance corrections → sitting_unstable"
+      from_standing: "Knees bent + hips at chair/bed height → sitting, not standing"
+    annotation_notes: "Includes sitting in chair, on bed edge (if stable), or wheelchair."
+
+  - id: 4
+    name: "sitting_unstable"
+    short: "SIU"
+    color: "#FFC107"  # Amber
+    description: "Patient seated but showing postural instability"
+    detection_type: "dynamic"
+    clinical_urgency: "medium"
+    visual_criteria:
+      - "Seated posture with visible sway or rocking"
+      - "Repeated balance corrections (hands grabbing, torso shifting)"
+      - "Head/shoulders oscillating > ~10cm from center"
+    disambiguation:
+      from_sitting_stable: "Any visible sway or balance correction → unstable"
+      from_bed_exit: "If movement is clearly directional toward leaving bed → bed_exit"
+      from_agitated: "If high energy + thrashing while seated → agitated"
+    annotation_notes: "This is a FALL RISK indicator. Label even brief instability episodes."
+
+  - id: 5
+    name: "bed_exit"
+    short: "BEX"
+    color: "#F44336"  # Red
+    description: "Patient attempting to leave bed (sitting at edge, legs over side, or getting up)"
+    detection_type: "transitional"
+    clinical_urgency: "high"
+    visual_criteria:
+      - "Patient moves from lying/sitting center-bed to bed edge"
+      - "Legs swing over bed side"
+      - "Weight shift toward standing from bed"
+    disambiguation:
+      from_turning_in_bed: "Movement toward bed edge (not just rolling) → bed_exit"
+      from_standing: "Once fully upright and off bed → standing"
+      from_sitting_stable: "Sitting at bed center = sitting_stable. At edge with intent to stand = bed_exit"
+    annotation_notes: "CRITICAL label. Include the full sequence: approach edge → legs over → weight shift. Even if patient doesn't complete the exit, label the attempt."
+
+  - id: 6
+    name: "standing"
+    short: "STD"
+    color: "#00BCD4"  # Cyan
+    description: "Patient fully upright on feet, stationary or minimal weight shifting"
+    detection_type: "static"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Full vertical extent visible (head to feet)"
+      - "Legs straight (knees extended)"
+      - "Not translating across the room (that is walking)"
+    disambiguation:
+      from_walking: "If feet alternating and COM translating → walking"
+      from_sitting_stable: "If hips above knee level + legs straight → standing"
+    annotation_notes: "Includes standing still, minor weight shifts, and brief pauses during walking."
+
+  - id: 7
+    name: "walking"
+    short: "WLK"
+    color: "#009688"  # Teal
+    description: "Patient moving across space with rhythmic gait pattern"
+    detection_type: "dynamic"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Alternating leg motion"
+      - "COM translating across frame"
+      - "Rhythmic pattern (not stumbling/falling)"
+    disambiguation:
+      from_standing: "Must have COM translation + leg alternation"
+      from_agitated: "Pacing with high energy + non-purposeful → agitated"
+      from_fallen: "If walking transitions to rapid descent → label transition point then fallen"
+    annotation_notes: "Includes slow/shuffling/assisted walking. Gait quality is a Level 2 derived metric, not a label."
+
+  - id: 8
+    name: "agitated"
+    short: "AGT"
+    color: "#E91E63"  # Pink
+    description: "High-energy, non-purposeful, sustained body movement"
+    detection_type: "dynamic"
+    clinical_urgency: "high"
+    visual_criteria:
+      - "Sustained high motion energy across multiple joints"
+      - "Non-rhythmic, non-purposeful movement"
+      - "May include: thrashing, pulling, repeated reaching, rocking violently"
+    disambiguation:
+      from_lying_restless: "Must be HIGH energy + sustained (> 3 seconds of vigorous motion)"
+      from_convulsive: "Agitated = voluntary-appearing. Convulsive = involuntary rhythmic"
+      from_walking: "Purposeful locomotion = walking. Pacing frantically = agitated"
+    annotation_notes: "This triggers nurse alert. Err on the side of labeling borderline cases as agitated (high recall preferred for safety)."
+
+  - id: 9
+    name: "convulsive"
+    short: "CNV"
+    color: "#D50000"  # Dark Red
+    description: "Involuntary, rhythmic, high-frequency whole-body or limb movements"
+    detection_type: "dynamic"
+    clinical_urgency: "critical"
+    visual_criteria:
+      - "Very high frequency limb/body oscillations"
+      - "Symmetric or semi-symmetric pattern"
+      - "Appears involuntary (not goal-directed)"
+      - "Very high jerk index"
+    disambiguation:
+      from_agitated: "Convulsive = rhythmic + involuntary-appearing. Agitated = irregular + semi-voluntary"
+      from_lying_restless: "Convulsive has much higher frequency and amplitude than restlessness"
+    annotation_notes: "EMERGENCY label. Includes tonic-clonic, myoclonic movements. When in doubt between agitated and convulsive, prefer convulsive (safety first)."
+
+  - id: 10
+    name: "fallen"
+    short: "FLN"
+    color: "#B71C1C"  # Dark Red variant
+    description: "Patient has fallen or is in the process of an uncontrolled descent"
+    detection_type: "transitional"
+    clinical_urgency: "critical"
+    visual_criteria:
+      - "Rapid uncontrolled downward movement (not intentional lying down)"
+      - "Patient ends up at ground/floor level (not in bed)"
+      - "Preceded by loss of balance or sudden posture collapse"
+    disambiguation:
+      from_lying_still: "Fallen = on floor (not bed). Lying_still = in bed"
+      from_bed_exit: "Controlled descent = bed_exit. Uncontrolled = fallen"
+      from_standing: "If patient intentionally lowers to ground → not fallen. Uncontrolled → fallen"
+    annotation_notes: "EMERGENCY label. Label both the fall itself AND the post-fall period (patient on ground). Switch to another label only when patient recovers upright."
+
+  - id: 11
+    name: "occluded"
+    short: "OCC"
+    color: "#9E9E9E"  # Grey
+    description: "Patient not sufficiently visible for reliable classification"
+    detection_type: "meta"
+    clinical_urgency: "low"
+    visual_criteria:
+      - "Fewer than 8 keypoints detected with confidence > 0.3"
+      - "Patient blocked by caregiver, equipment, or furniture"
+      - "Camera obstruction or extreme angle"
+    disambiguation:
+      from_lying_still: "Blanket-covered but shape visible + some keypoints → lying_still, not occluded"
+      from_any: "If you can reasonably determine the activity, label the activity, not occluded"
+    annotation_notes: "Use sparingly. Only when you genuinely cannot determine what the patient is doing. A covered patient breathing in bed is lying_still, not occluded."
+
+# ============================================================
+# ANNOTATION RULES (for labelers)
+# ============================================================
+annotation_rules:
+  general:
+    - "Each time segment gets exactly ONE label (mutually exclusive)"
+    - "Label what is DOMINANT in the 3-second window"
+    - "If an activity transition happens mid-window, label the activity that occupies >50% of the window"
+    - "Transitions between states are labeled at the BOUNDARY (start of new state)"
+    - "When uncertain between two labels, prefer the higher-urgency label (safety bias)"
+
+  priority_ordering: "convulsive > fallen > agitated > bed_exit > sitting_unstable > all others"
+
+  edge_cases:
+    caregiver_present: "If caregiver partially occludes patient but activity is still identifiable, label the activity. If fully blocked, use occluded."
+    blanket_coverage: "Blanket-covered patient with visible outline → label based on visible motion (lying_still or lying_restless). Fully covered with no motion cues → occluded."
+    brief_transitions: "Standing for <1.5s between sitting and walking → label the destination state (walking)."
+    multiple_activities: "If patient is both walking AND agitated (frantic pacing), prefer agitated."
+
+# ============================================================
+# ANNOTATION FILE FORMAT (output per video)
+# ============================================================
+output_format:
+  type: "jsonl"  # One JSON object per line
+  filename_pattern: "{video_id}_temporal_labels.jsonl"
+
+  segment_schema:
+    video_id: "string - unique video identifier"
+    start_sec: "float - segment start time in seconds"
+    end_sec: "float - segment end time in seconds"
+    start_frame: "int - start frame number"
+    end_frame: "int - end frame number"
+    label: "string - class name from classes list"
+    label_id: "int - class id (0-11)"
+    confidence: "float - annotator confidence (0.0-1.0, optional)"
+    annotator_id: "string - who labeled this segment"
+    notes: "string - optional free-text notes"
+
+  example: |
+    {"video_id": "patient_001_session_03", "start_sec": 0.0, "end_sec": 3.0, "start_frame": 0, "end_frame": 45, "label": "lying_still", "label_id": 0, "confidence": 0.95, "annotator_id": "ann_01", "notes": ""}
+    {"video_id": "patient_001_session_03", "start_sec": 3.0, "end_sec": 9.0, "start_frame": 45, "end_frame": 135, "label": "turning_in_bed", "label_id": 2, "confidence": 0.85, "annotator_id": "ann_01", "notes": "slow roll to left side"}
+    {"video_id": "patient_001_session_03", "start_sec": 9.0, "end_sec": 24.0, "start_frame": 135, "end_frame": 360, "label": "lying_still", "label_id": 0, "confidence": 0.9, "annotator_id": "ann_01", "notes": ""}
+
+# ============================================================
+# DATASET SPLIT STRATEGY
+# ============================================================
+dataset_split:
+  strategy: "patient-level"  # Never split same patient across train/val/test
+  ratios:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+
+  constraints:
+    - "Each split must contain at least 2 examples of every class"
+    - "Critical classes (convulsive, fallen) must have >= 500 training windows after augmentation"
+    - "No same-patient data in both train and test"
+    - "Val set should include at least 3 different camera angles"
+
+# ============================================================
+# CLASS BALANCE TARGETS
+# ============================================================
+class_balance:
+  expected_distribution:
+    lying_still: 0.35         # Most common (sleeping patients)
+    lying_restless: 0.12
+    turning_in_bed: 0.08
+    sitting_stable: 0.12
+    sitting_unstable: 0.04    # Less common
+    bed_exit: 0.03            # Rare but critical
+    standing: 0.08
+    walking: 0.06
+    agitated: 0.04            # Rare but critical
+    convulsive: 0.01          # Very rare, needs synthesis
+    fallen: 0.01              # Very rare, needs synthesis
+    occluded: 0.06
+
+  balancing_strategy:
+    undersampling: "lying_still capped at 3x median class count"
+    oversampling: "Window-level augmentation for rare classes (time-warp, noise injection)"
+    synthetic: "Acted/simulated videos required for convulsive and fallen classes"
+
+# ============================================================
+# QUALITY ASSURANCE
+# ============================================================
+quality:
+  inter_annotator_agreement:
+    metric: "Cohen's Kappa"
+    minimum_threshold: 0.75
+    evaluation_set_size: 50  # segments dual-annotated per QA round
+
+  auto_validation_rules:
+    - "No segment shorter than min_segment_duration_sec (1.5s)"
+    - "No gaps between segments (full video must be covered)"
+    - "fallen must be preceded by standing, walking, sitting_unstable, or bed_exit within 10s"
+    - "convulsive segments rarely last > 120s (flag for review if longer)"
+    - "bed_exit should not appear without prior lying/sitting in same session"
+    - "walking requires standing within 10s before or after"
+
+# ============================================================
+# EXISTING VIDEO MAPPING
+# Maps your clinical_validation_data videos to this schema
+# ============================================================
+existing_video_mapping:
+  "AGITATED - 2.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Full clip is single activity. Label entire duration as agitated."
+  "RESTLESS - 2.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Map to lying_restless (closest Level 1 class)."
+  "THRASHING - 2.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Thrashing maps to agitated (high energy, non-rhythmic)."
+  "COUGHING - 1.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Coughing is not a Level 1 class. Body motion during coughing → lying_restless."
+  "HAND TO FACE - 1.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Hand-to-face motion → lying_restless. Self-contact is Level 2 derived."
+  "HAND TO FACE - 2.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Same as above at different distance."
+  "HAND TO CHEST TUBE - 1.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Tube interaction with urgency → agitated. Tube-specific is Level 2."
+  "HAND TO CHEST TUBE - 2.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Same as above at different distance."
+  "HAND TO IV - 1.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Reaching for IV without urgency → lying_restless."
+  "HAND TO IV LINE - 2.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Same as above."
+  "HAND TO MASK - 1.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Mask removal attempts → agitated (device interference)."
+  "HAND TO MASK - 2.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Same as above."
+  "PULLING AT TUBES - 2.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Active pulling → agitated."
+  "REMOVAL OF MASK - 1.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Active device removal → agitated."
+  "REMOVAL OF MASK - 2.8 M.mp4":
+    primary_label: "agitated"
+    notes: "Same as above."
+  "LABOURED BREATHING - 1.8 M.mp4":
+    primary_label: "lying_restless"
+    notes: "Laboured breathing visible as body motion → lying_restless. Respiratory is Level 2."
+  "RESPIRATORY DISTRESS - 1.8 M.mp4":
+    primary_label: "agitated"
+    notes: "If visible distress with body movement → agitated."

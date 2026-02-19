@@ -1,0 +1,28 @@
+{
+  "evaluation_timestamp": 1766416465.8341303,
+  "methods_evaluated": [
+    "geometric",
+    "kinematic",
+    "smplx"
+  ],
+  "clinical_scenarios_tested": 3,
+  "performance_comparison": {
+    "avg_accuracy": {
+      "geometric": 0.0,
+      "kinematic": 0.0
+    },
+    "avg_latency_ms": {
+      "geometric": 0.0,
+      "kinematic": 0.0
+    },
+    "success_rate": {
+      "geometric": 1.0,
+      "kinematic": 1.0
+    }
+  },
+  "clinical_accuracy_comparison": {},
+  "recommendations": [
+    "SMPL-X models not available - using geometric fallback",
+    "Download SMPL-X models for optimal clinical performance"
+  ]
+}

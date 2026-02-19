@@ -1,0 +1,134 @@
+# Optimization Configuration for Enhanced Activity Monitor
+
+# ===========================================================================
+# OPTIMIZATION FEATURE FLAGS
+# ===========================================================================
+
+optimizations:
+  # Immediate High ROI (30-95% speedup)
+  vectorized_features: true      # NumPy vectorization for feature extraction
+  early_exit_classification: true # Decision tree with early exit
+  distance_cache: true           # Pre-computed pairwise distances
+
+  # Short-term Medium ROI (25-50% additional speedup)
+  circular_buffers: true         # Pre-allocated fixed-size buffers
+  heapq_topk: true              # Heapq for O(n log k) top-k selection
+  lsh_reid: false               # LSH for person re-identification (set true if using)
+
+  # Long-term Quality Improvements (15-40% gains)
+  dp_sequence: true             # Dynamic programming for sequence optimization
+  skeleton_graph: true          # Graph-based skeleton representation
+  memoization: true             # Frame-level computation caching
+
+# ===========================================================================
+# PERFORMANCE TUNING PARAMETERS
+# ===========================================================================
+
+tuning:
+  # LSH (Locality-Sensitive Hashing) Parameters
+  lsh:
+    num_tables: 8               # Number of hash tables (more = better recall, slower)
+    hash_size: 16               # Number of hash bits (more = better precision, more memory)
+    feature_dim: 512            # Feature vector dimension
+    similarity_threshold: 0.75  # Minimum cosine similarity for match (0-1)
+    max_age_frames: 30          # Maximum frames to keep track without update
+
+  # Circular Buffer Sizes
+  buffers:
+    kps_history_size: 30        # Keypoint history buffer capacity
+    activity_buffer_size: 10    # Activity sequence buffer for DP optimization
+    motion_buffer_size: 20      # Motion pattern buffer
+
+  # Top-K Selection
+  detection:
+    max_detections: 5           # Maximum detections to return per frame
+    confidence_threshold: 0.5   # Minimum confidence for detection
+
+  # Early-Exit Decision Tree Thresholds
+  decision_tree:
+    critical_motion: 0.8        # Threshold for critical motion (seizure/agitation)
+    stillness: 0.005            # Threshold for stillness (sleeping/unresponsive)
+    moderate_movement: 0.05     # Threshold for moderate movement
+    vertical_ratio_lying: 0.8   # Aspect ratio threshold for lying posture
+    vertical_ratio_standing: 1.5 # Aspect ratio threshold for standing posture
+    leg_motion: 0.02            # Leg movement detection threshold
+    hand_near_face: 0.2         # Hand proximity to face threshold
+    seizure_variance: 0.01      # Movement variance threshold for seizure
+
+  # Memoization Cache
+  memoization:
+    max_cache_size: 100         # Maximum cached items per frame
+    enable_hit_rate_logging: true # Log cache hit rates for monitoring
+
+  # Skeleton Graph
+  skeleton_graph:
+    use_cached_angles: true     # Cache joint angle computations
+    compute_limb_lengths: true  # Pre-compute limb lengths
+
+# ===========================================================================
+# PERFORMANCE MONITORING
+# ===========================================================================
+
+monitoring:
+  enable_performance_tracking: true # Enable performance metrics collection
+  log_cache_hit_rates: true         # Log memoization cache effectiveness
+  log_interval_frames: 100          # Log metrics every N frames
+  save_metrics_to_file: true        # Save metrics to JSON file
+  metrics_file_path: 'performance_metrics.json'
+
+  # Metrics to track
+  track_metrics:
+    - frame_processing_time_ms
+    - feature_extraction_time_ms
+    - activity_classification_time_ms
+    - distance_cache_time_ms
+    - lsh_query_time_ms
+    - cache_hit_rate
+    - memory_usage_mb
+    - fps
+
+  # Performance thresholds for warnings
+  thresholds:
+    max_frame_processing_time_ms: 100 # Warn if frame takes > 100ms
+    min_fps: 15                       # Warn if FPS drops below 15
+    min_cache_hit_rate: 0.5          # Warn if cache hit rate < 50%
+
+# ===========================================================================
+# BACKWARD COMPATIBILITY
+# ===========================================================================
+
+backward_compatibility:
+  enable_fallback: true         # Fallback to original implementation on error
+  strict_mode: false            # Strict mode: fail on optimization errors
+  log_fallbacks: true           # Log when fallback is used
+
+# ===========================================================================
+# ADVANCED SETTINGS
+# ===========================================================================
+
+advanced:
+  # NumPy Settings
+  numpy:
+    float_precision: 'float32'  # Use float32 for memory efficiency
+    enable_fast_math: true      # Enable NumPy fast math operations
+
+  # Parallel Processing
+  parallel:
+    enable_multiprocessing: false # Enable multiprocessing (experimental)
+    num_workers: 4                # Number of worker processes
+
+  # Profiling
+  profiling:
+    enable_profiler: false      # Enable detailed profiling (for debugging)
+    profile_every_n_frames: 100 # Profile every N frames
+    profile_output_dir: 'profiles/'
+
+# ===========================================================================
+# EXPERIMENTAL FEATURES
+# ===========================================================================
+
+experimental:
+  # These features are experimental and may not be stable
+  enable_gpu_acceleration: false     # Use GPU for computations (requires CUDA)
+  enable_adaptive_thresholds: false  # Adaptively tune thresholds based on data
+  enable_online_learning: false      # Learn transition costs from data
