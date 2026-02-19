@@ -3,17 +3,45 @@ import sqlite3
 import json
 import os
 import logging
+from datetime import timedelta
 
 log = logging.getLogger("db")
 
 DB_PATH = "storage/events.db"
 
 class LocalDB:
-    def __init__(self, path=DB_PATH):
-        """Initialize local SQLite database for event storage."""
+    def __init__(self, path=DB_PATH, enable_wal=True):
+        """
+        Initialize local SQLite database for event storage.
+
+        Args:
+            path: Database file path
+            enable_wal: Enable WAL mode for better concurrency (SSD optimized)
+        """
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.path = path
+
+        # ══════════════════════════════════════════════════════════════════
+        # SSD OPTIMIZATION: WAL mode + PRAGMA settings for edge deployment
+        # ══════════════════════════════════════════════════════════════════
+        if enable_wal:
+            try:
+                # WAL mode: Better concurrency, reduced write amplification
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                # Synchronous NORMAL: Balance between safety and performance
+                # FULL is safer but slower; OFF is fastest but risky
+                self.conn.execute("PRAGMA synchronous=NORMAL")
+                # Larger cache for better read performance (10MB)
+                self.conn.execute("PRAGMA cache_size=-10000")
+                # Memory-mapped I/O for faster reads (64MB)
+                self.conn.execute("PRAGMA mmap_size=67108864")
+                # Temp store in memory (faster, uses RAM)
+                self.conn.execute("PRAGMA temp_store=MEMORY")
+                log.info("SQLite WAL mode enabled with SSD optimizations")
+            except Exception as e:
+                log.warning("Failed to enable WAL mode: %s", e)
+
         self._create()
         log.info("Local database initialized: %s", path)
 
@@ -120,6 +148,48 @@ class LocalDB:
             UNIQUE(patient_id, device_id, baseline_type)
         )""")
 
+        # Hourly aggregates table (efficient reporting)
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS hourly_aggregates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hour_start REAL NOT NULL,
+            hour_end REAL NOT NULL,
+            device_id TEXT NOT NULL,
+            patient_id TEXT,
+            total_frames INTEGER DEFAULT 0,
+            frames_with_person INTEGER DEFAULT 0,
+            total_observation_seconds REAL DEFAULT 0,
+            posture_seconds TEXT,
+            dominant_posture TEXT,
+            support_surface_seconds TEXT,
+            time_in_bed_seconds REAL DEFAULT 0,
+            time_in_bed_pct REAL DEFAULT 0,
+            bed_exit_count INTEGER DEFAULT 0,
+            bed_exit_attempts INTEGER DEFAULT 0,
+            fall_events INTEGER DEFAULT 0,
+            immobility_periods INTEGER DEFAULT 0,
+            immobility_total_seconds REAL DEFAULT 0,
+            distress_periods INTEGER DEFAULT 0,
+            distress_total_seconds REAL DEFAULT 0,
+            max_agitation_score REAL DEFAULT 0,
+            avg_agitation_score REAL DEFAULT 0,
+            max_delirium_risk REAL DEFAULT 0,
+            avg_delirium_risk REAL DEFAULT 0,
+            max_respiratory_distress REAL DEFAULT 0,
+            avg_respiratory_distress REAL DEFAULT 0,
+            max_fall_risk REAL DEFAULT 0,
+            avg_fall_risk REAL DEFAULT 0,
+            activity_seconds TEXT,
+            dominant_activity TEXT,
+            alert_counts TEXT,
+            critical_alerts INTEGER DEFAULT 0,
+            high_risk_alerts INTEGER DEFAULT 0,
+            avg_pose_confidence REAL DEFAULT 0,
+            keypoint_visibility_pct REAL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(device_id, hour_start)
+        )""")
+
         # Create indexes
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_device ON events(device)")
@@ -136,6 +206,8 @@ class LocalDB:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_patient ON audit_log(patient_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_consent_patient ON patient_consent(patient_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_baselines_patient ON patient_baselines(patient_id, device_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_device_time ON hourly_aggregates(device_id, hour_start)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_patient ON hourly_aggregates(patient_id)")
 
         self.conn.commit()
 
@@ -248,7 +320,7 @@ class LocalDB:
     def cleanup_old_events(self, days=30):
         """
         Delete events older than specified days.
-        
+
         Args:
             days: Number of days to keep
         """
@@ -262,6 +334,92 @@ class LocalDB:
             return deleted
         except Exception as e:
             log.exception("Failed to cleanup old events: %s", e)
+            return 0
+
+    def run_full_cleanup(self, events_days=30, alerts_days=90, health_days=14, audit_days=365):
+        """
+        Run full cleanup on all tables with configurable retention periods.
+
+        Args:
+            events_days: Retain events for N days (default: 30)
+            alerts_days: Retain alerts for N days (default: 90, longer for clinical review)
+            health_days: Retain system_health for N days (default: 14)
+            audit_days: Retain audit_log for N days (default: 365, HIPAA compliance)
+
+        Returns:
+            dict: Deleted counts per table
+        """
+        import time as _time
+        results = {
+            "events": 0,
+            "alerts": 0,
+            "system_health": 0,
+            "audit_log": 0,
+            "hourly_aggregates": 0,
+        }
+
+        now = _time.time()
+
+        try:
+            # Events cleanup
+            cutoff = now - (events_days * 86400)
+            cursor = self.conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            results["events"] = cursor.rowcount
+
+            # Alerts cleanup (longer retention for clinical review)
+            cutoff = now - (alerts_days * 86400)
+            cursor = self.conn.execute("DELETE FROM alerts WHERE ts < ?", (cutoff,))
+            results["alerts"] = cursor.rowcount
+
+            # System health cleanup
+            cutoff = now - (health_days * 86400)
+            cursor = self.conn.execute("DELETE FROM system_health WHERE ts < ?", (cutoff,))
+            results["system_health"] = cursor.rowcount
+
+            # Audit log cleanup (HIPAA: minimum 6 years, we use 1 year default)
+            cutoff = now - (audit_days * 86400)
+            cursor = self.conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+            results["audit_log"] = cursor.rowcount
+
+            # Hourly aggregates cleanup (keep 90 days for reporting)
+            cutoff = now - (90 * 86400)
+            cursor = self.conn.execute("DELETE FROM hourly_aggregates WHERE hour_start < ?", (cutoff,))
+            results["hourly_aggregates"] = cursor.rowcount
+
+            self.conn.commit()
+
+            # VACUUM to reclaim disk space (SSD optimization)
+            total_deleted = sum(results.values())
+            if total_deleted > 1000:
+                try:
+                    self.conn.execute("VACUUM")
+                    log.info("Database vacuumed after cleanup (%d rows deleted)", total_deleted)
+                except Exception as e:
+                    log.debug("VACUUM failed (may be in transaction): %s", e)
+
+            log.info("Full cleanup complete: events=%d, alerts=%d, health=%d, audit=%d, hourly=%d",
+                     results["events"], results["alerts"], results["system_health"],
+                     results["audit_log"], results["hourly_aggregates"])
+
+            return results
+
+        except Exception as e:
+            log.exception("Full cleanup failed: %s", e)
+            return results
+
+    def get_database_size(self):
+        """Get database file size in bytes."""
+        try:
+            if os.path.exists(self.path):
+                size = os.path.getsize(self.path)
+                # Also check WAL file if exists
+                wal_path = self.path + "-wal"
+                if os.path.exists(wal_path):
+                    size += os.path.getsize(wal_path)
+                return size
+            return 0
+        except Exception as e:
+            log.debug("Failed to get database size: %s", e)
             return 0
 
     def insert_alert(self, device, alert_level, label=None, agitation_score=None,
@@ -522,6 +680,255 @@ class LocalDB:
                      patient_id, device_id, baseline_type)
         except Exception as e:
             log.exception("Failed to delete baseline: %s", e)
+
+    # ------------------------------------------------------------------
+    # Hourly aggregates for efficient reporting
+    # ------------------------------------------------------------------
+
+    def insert_hourly_aggregate(self, metrics):
+        """
+        Insert or update hourly aggregate data.
+
+        Args:
+            metrics: HourlyMetrics dataclass or dict with aggregate data
+        """
+        try:
+            # Convert dataclass to dict if needed
+            if hasattr(metrics, 'to_dict'):
+                data = metrics.to_dict()
+            else:
+                data = metrics
+
+            self.conn.execute("""
+                INSERT INTO hourly_aggregates (
+                    hour_start, hour_end, device_id, patient_id,
+                    total_frames, frames_with_person, total_observation_seconds,
+                    posture_seconds, dominant_posture,
+                    support_surface_seconds, time_in_bed_seconds, time_in_bed_pct,
+                    bed_exit_count, bed_exit_attempts, fall_events,
+                    immobility_periods, immobility_total_seconds,
+                    distress_periods, distress_total_seconds,
+                    max_agitation_score, avg_agitation_score,
+                    max_delirium_risk, avg_delirium_risk,
+                    max_respiratory_distress, avg_respiratory_distress,
+                    max_fall_risk, avg_fall_risk,
+                    activity_seconds, dominant_activity,
+                    alert_counts, critical_alerts, high_risk_alerts,
+                    avg_pose_confidence, keypoint_visibility_pct
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(device_id, hour_start) DO UPDATE SET
+                    total_frames = excluded.total_frames,
+                    frames_with_person = excluded.frames_with_person,
+                    total_observation_seconds = excluded.total_observation_seconds,
+                    posture_seconds = excluded.posture_seconds,
+                    dominant_posture = excluded.dominant_posture,
+                    support_surface_seconds = excluded.support_surface_seconds,
+                    time_in_bed_seconds = excluded.time_in_bed_seconds,
+                    time_in_bed_pct = excluded.time_in_bed_pct,
+                    bed_exit_count = excluded.bed_exit_count,
+                    bed_exit_attempts = excluded.bed_exit_attempts,
+                    fall_events = excluded.fall_events,
+                    immobility_periods = excluded.immobility_periods,
+                    immobility_total_seconds = excluded.immobility_total_seconds,
+                    distress_periods = excluded.distress_periods,
+                    distress_total_seconds = excluded.distress_total_seconds,
+                    max_agitation_score = excluded.max_agitation_score,
+                    avg_agitation_score = excluded.avg_agitation_score,
+                    max_delirium_risk = excluded.max_delirium_risk,
+                    avg_delirium_risk = excluded.avg_delirium_risk,
+                    max_respiratory_distress = excluded.max_respiratory_distress,
+                    avg_respiratory_distress = excluded.avg_respiratory_distress,
+                    max_fall_risk = excluded.max_fall_risk,
+                    avg_fall_risk = excluded.avg_fall_risk,
+                    activity_seconds = excluded.activity_seconds,
+                    dominant_activity = excluded.dominant_activity,
+                    alert_counts = excluded.alert_counts,
+                    critical_alerts = excluded.critical_alerts,
+                    high_risk_alerts = excluded.high_risk_alerts,
+                    avg_pose_confidence = excluded.avg_pose_confidence,
+                    keypoint_visibility_pct = excluded.keypoint_visibility_pct
+            """, (
+                data.get("hour_start"),
+                data.get("hour_end"),
+                data.get("device_id"),
+                data.get("patient_id"),
+                data.get("total_frames", 0),
+                data.get("frames_with_person", 0),
+                data.get("total_observation_seconds", 0),
+                json.dumps(data.get("posture_seconds", {})),
+                data.get("dominant_posture"),
+                json.dumps(data.get("support_surface_seconds", {})),
+                data.get("time_in_bed_seconds", 0),
+                data.get("time_in_bed_pct", 0),
+                data.get("bed_exit_count", 0),
+                data.get("bed_exit_attempts", 0),
+                data.get("fall_events", 0),
+                data.get("immobility_periods", 0),
+                data.get("immobility_total_seconds", 0),
+                data.get("distress_periods", 0),
+                data.get("distress_total_seconds", 0),
+                data.get("max_agitation_score", 0),
+                data.get("avg_agitation_score", 0),
+                data.get("max_delirium_risk", 0),
+                data.get("avg_delirium_risk", 0),
+                data.get("max_respiratory_distress", 0),
+                data.get("avg_respiratory_distress", 0),
+                data.get("max_fall_risk", 0),
+                data.get("avg_fall_risk", 0),
+                json.dumps(data.get("activity_seconds", {})),
+                data.get("dominant_activity"),
+                json.dumps(data.get("alert_counts", {})),
+                data.get("critical_alerts", 0),
+                data.get("high_risk_alerts", 0),
+                data.get("avg_pose_confidence", 0),
+                data.get("keypoint_visibility_pct", 0),
+            ))
+            self.conn.commit()
+            log.debug("Hourly aggregate saved: device=%s hour=%s",
+                     data.get("device_id"), data.get("hour_start"))
+        except Exception as e:
+            log.exception("Failed to insert hourly aggregate: %s", e)
+
+    def query_hourly_aggregates(
+        self,
+        device_id: str = None,
+        patient_id: str = None,
+        start_ts: float = None,
+        end_ts: float = None,
+        limit: int = 1000
+    ):
+        """
+        Query hourly aggregates for efficient reporting.
+
+        Args:
+            device_id: Filter by device
+            patient_id: Filter by patient
+            start_ts: Start timestamp
+            end_ts: End timestamp
+            limit: Maximum results
+
+        Returns:
+            List of hourly aggregate dictionaries
+        """
+        query = "SELECT * FROM hourly_aggregates WHERE 1=1"
+        params = []
+
+        if device_id:
+            query += " AND device_id = ?"
+            params.append(device_id)
+        if patient_id:
+            query += " AND patient_id = ?"
+            params.append(patient_id)
+        if start_ts:
+            query += " AND hour_start >= ?"
+            params.append(start_ts)
+        if end_ts:
+            query += " AND hour_end <= ?"
+            params.append(end_ts)
+
+        query += " ORDER BY hour_start DESC LIMIT ?"
+        params.append(limit)
+
+        try:
+            cursor = self.conn.execute(query, params)
+            columns = [desc[0] for desc in cursor.description]
+            results = []
+
+            for row in cursor:
+                record = dict(zip(columns, row))
+                # Parse JSON fields
+                for field in ["posture_seconds", "support_surface_seconds",
+                             "activity_seconds", "alert_counts"]:
+                    if record.get(field):
+                        try:
+                            record[field] = json.loads(record[field])
+                        except (json.JSONDecodeError, TypeError):
+                            record[field] = {}
+                results.append(record)
+
+            return results
+        except Exception as e:
+            log.exception("Failed to query hourly aggregates: %s", e)
+            return []
+
+    def get_daily_summary(self, device_id: str, date_str: str) -> dict:
+        """
+        Get daily summary from hourly aggregates.
+
+        Args:
+            device_id: Device identifier
+            date_str: Date string (YYYY-MM-DD)
+
+        Returns:
+            Aggregated daily summary
+        """
+        from datetime import datetime as dt
+
+        try:
+            date = dt.strptime(date_str, "%Y-%m-%d")
+            start_ts = date.timestamp()
+            end_ts = (date + timedelta(days=1)).timestamp()
+
+            hours = self.query_hourly_aggregates(
+                device_id=device_id,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                limit=24
+            )
+
+            if not hours:
+                return {}
+
+            # Aggregate hourly data
+            total_frames = sum(h.get("total_frames", 0) for h in hours)
+            total_bed_time = sum(h.get("time_in_bed_seconds", 0) for h in hours)
+            total_observation = sum(h.get("total_observation_seconds", 0) for h in hours)
+            total_bed_exits = sum(h.get("bed_exit_count", 0) for h in hours)
+            total_falls = sum(h.get("fall_events", 0) for h in hours)
+            total_immobility_periods = sum(h.get("immobility_periods", 0) for h in hours)
+            total_immobility_seconds = sum(h.get("immobility_total_seconds", 0) for h in hours)
+
+            # Find max risk scores
+            max_agitation = max((h.get("max_agitation_score", 0) for h in hours), default=0)
+            max_delirium = max((h.get("max_delirium_risk", 0) for h in hours), default=0)
+            max_fall_risk = max((h.get("max_fall_risk", 0) for h in hours), default=0)
+
+            # Aggregate posture distribution
+            posture_totals = {}
+            for h in hours:
+                for posture, seconds in h.get("posture_seconds", {}).items():
+                    posture_totals[posture] = posture_totals.get(posture, 0) + seconds
+
+            # Find dominant posture
+            dominant_posture = max(posture_totals.items(), key=lambda x: x[1])[0] if posture_totals else "unknown"
+
+            # Total alerts
+            critical_total = sum(h.get("critical_alerts", 0) for h in hours)
+            high_risk_total = sum(h.get("high_risk_alerts", 0) for h in hours)
+
+            return {
+                "date": date_str,
+                "device_id": device_id,
+                "hours_with_data": len(hours),
+                "total_frames": total_frames,
+                "total_observation_hours": round(total_observation / 3600, 2),
+                "time_in_bed_hours": round(total_bed_time / 3600, 2),
+                "time_in_bed_pct": round(total_bed_time / total_observation * 100, 1) if total_observation > 0 else 0,
+                "bed_exit_count": total_bed_exits,
+                "fall_events": total_falls,
+                "immobility_periods": total_immobility_periods,
+                "immobility_hours": round(total_immobility_seconds / 3600, 2),
+                "max_agitation_score": max_agitation,
+                "max_delirium_risk": max_delirium,
+                "max_fall_risk": max_fall_risk,
+                "dominant_posture": dominant_posture,
+                "posture_distribution": posture_totals,
+                "critical_alerts": critical_total,
+                "high_risk_alerts": high_risk_total,
+            }
+        except Exception as e:
+            log.exception("Failed to get daily summary: %s", e)
+            return {}
 
     def close(self):
         """Close database connection."""

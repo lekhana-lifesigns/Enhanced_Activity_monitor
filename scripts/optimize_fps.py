@@ -104,7 +104,7 @@ def profile_pipeline(cfg: Dict, num_frames: int = 100) -> Dict:
  if len(pipeline.window) >= 8:
  temp_start = time.time()
  feat_win = np.stack(pipeline.window[-pipeline.temporal.window_size:])
- label, conf, probs = pipeline.temporal.predict(feat_win)
+ label, conf, probs, uncertainty = pipeline.temporal.predict(feat_win)
  temp_time = (time.time() - temp_start) * 1000.0
  timings['temporal_model'].append(temp_time)
  

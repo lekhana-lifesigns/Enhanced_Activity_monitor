@@ -147,11 +147,19 @@ models/tensorrt/*.trt
 *.engine
 *.trt
 
-# YOLO model weights (download separately)
+# YOLO model weights (download separately via ultralytics)
 yolo11n.pt
 yolo11n-pose.pt
 yolo11n-seg.pt
+yolo11n-cls.pt
+yolov8n.pt
+yolov8n-pose.pt
+yolov8n-seg.pt
 *.onnx
+
+# Training artifacts (generated during training runs)
+runs/
+training/notebooks/*.pt
 
 # Deployment artifacts
 venv/

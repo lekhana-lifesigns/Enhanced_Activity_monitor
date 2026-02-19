@@ -409,7 +409,7 @@ class EnhancedActivityClassifier:
         return None
     
     def _check_basic_postural(self, kps, posture_state):
-        """Check basic postural activities."""
+        """Check basic postural activities with improved sitting detection."""
         # Use posture state if available, otherwise infer from keypoints
         if posture_state:
             if posture_state == "supine":
@@ -417,22 +417,33 @@ class EnhancedActivityClassifier:
                     "activity": "lying",
                     "confidence": 0.85,
                     "priority": "NORMAL",
-                    "details": {"posture": "supine"}
+                    "details": {"posture": "supine", "subtype": "supine"}
                 }
-            elif posture_state == "sitting":
+            elif posture_state in ("sitting", "sitting_relaxed"):
+                # Enhanced sitting detection with hip-knee angle
+                sitting_subtype = self._classify_sitting_subtype(kps)
                 return {
                     "activity": "sitting",
                     "confidence": 0.85,
                     "priority": "NORMAL",
-                    "details": {"posture": "sitting"}
+                    "details": {"posture": "sitting", "subtype": sitting_subtype}
                 }
             elif posture_state in ["standing", "upright"]:
+                # Verify standing vs sitting using additional checks
+                if self._is_actually_sitting(kps):
+                    sitting_subtype = self._classify_sitting_subtype(kps)
+                    return {
+                        "activity": "sitting",
+                        "confidence": 0.80,
+                        "priority": "NORMAL",
+                        "details": {"posture": "sitting", "subtype": sitting_subtype}
+                    }
                 return {
                     "activity": "standing",
                     "confidence": 0.85,
                     "priority": "NORMAL",
                     "details": {"posture": "standing"}
-                } # Needs improvement....
+                }
         
         # Fallback: infer from keypoints
         vertical_extent = self._compute_vertical_extent(kps)
@@ -874,13 +885,89 @@ class EnhancedActivityClassifier:
         if horizontal_extent < 1e-6:
             return "unknown"
         aspect_ratio = vertical_extent / horizontal_extent
-        
+
         if aspect_ratio > 1.2:
             return "standing"
         elif aspect_ratio > 0.8:
             return "sitting"
         else:
             return "lying"
+
+    def _is_actually_sitting(self, kps):
+        """
+        Verify if person is actually sitting vs standing.
+        Uses hip-knee angle and vertical extent to distinguish.
+        """
+        try:
+            # Get hip and knee positions
+            lhip = self._get_keypoint(kps, LEFT_HIP)
+            rhip = self._get_keypoint(kps, RIGHT_HIP)
+            lknee = self._get_keypoint(kps, LEFT_KNEE)
+            rknee = self._get_keypoint(kps, RIGHT_KNEE)
+
+            # Compute hip-knee angle (thigh angle from vertical)
+            angles = []
+            if lhip[2] > 0.3 and lknee[2] > 0.3:
+                dx = lknee[0] - lhip[0]
+                dy = lknee[1] - lhip[1]
+                angles.append(abs(math.degrees(math.atan2(dx, dy))))
+            if rhip[2] > 0.3 and rknee[2] > 0.3:
+                dx = rknee[0] - rhip[0]
+                dy = rknee[1] - rhip[1]
+                angles.append(abs(math.degrees(math.atan2(dx, dy))))
+
+            if not angles:
+                return False
+
+            avg_hip_knee_angle = np.mean(angles)
+
+            # If thighs are bent (angle < 60 degrees from vertical), likely sitting
+            # Standing would have nearly vertical thighs (angle > 70 degrees)
+            return avg_hip_knee_angle < 60.0
+
+        except Exception:
+            return False
+
+    def _classify_sitting_subtype(self, kps):
+        """
+        Classify sitting subtype: upright, slouched, leaning_forward, leaning_back.
+        Useful for distinguishing chair vs couch sitting.
+        """
+        try:
+            # Get spine angle
+            lshoulder = self._get_keypoint(kps, LEFT_SHOULDER)
+            rshoulder = self._get_keypoint(kps, RIGHT_SHOULDER)
+            lhip = self._get_keypoint(kps, LEFT_HIP)
+            rhip = self._get_keypoint(kps, RIGHT_HIP)
+
+            shoulder_x = (lshoulder[0] + rshoulder[0]) / 2.0
+            shoulder_y = (lshoulder[1] + rshoulder[1]) / 2.0
+            hip_x = (lhip[0] + rhip[0]) / 2.0
+            hip_y = (lhip[1] + rhip[1]) / 2.0
+
+            # Spine angle from vertical
+            dx = shoulder_x - hip_x
+            dy = shoulder_y - hip_y
+            spine_angle = math.degrees(math.atan2(dx, -dy))  # Negative dy because y increases downward
+
+            # Hip-knee angle for leg position
+            lknee = self._get_keypoint(kps, LEFT_KNEE)
+            rknee = self._get_keypoint(kps, RIGHT_KNEE)
+
+            knee_y = (lknee[1] + rknee[1]) / 2.0 if lknee[2] > 0.3 and rknee[2] > 0.3 else hip_y
+
+            # Classify based on spine angle and leg position
+            if spine_angle > 15:
+                return "leaning_forward"
+            elif spine_angle < -15:
+                return "leaning_back"  # Typical couch sitting
+            elif abs(spine_angle) < 10 and knee_y > hip_y + 0.05:
+                return "upright"  # Chair sitting
+            else:
+                return "slouched"  # Relaxed sitting
+
+        except Exception:
+            return "unknown"
     
     def _is_crawling(self, kps, kps_history):
         """Detect crawling - low to ground, arm and leg movement."""

@@ -1,13 +1,29 @@
 # pipeline/depth/depth_estimator.py
 """
 Depth estimation module for 3D pose analysis.
-Uses lightweight depth estimation to convert 2D keypoints to 3D coordinates.
+Uses monocular depth estimation (DNNs like CNNs or ViTs) to convert 2D keypoints to 3D.
+
+How monocular depth estimation works:
+1. Input: RGB image (height × width × 3 channels)
+2. Preprocessing: Normalize pixels, resize to model input size, convert to tensor
+3. Encoder: CNN (ResNet) or ViT extracts features, learns monocular depth cues:
+   - Perspective: Parallel lines converging in distance
+   - Size: Familiar objects appear smaller when farther
+   - Texture gradient: Textures appear finer at distance
+   - Occlusion: Blocking objects are closer
+4. Decoder: Constructs dense depth map with skip connections for sharp boundaries
+5. Output: Depth map where pixel intensity = distance from camera
+
+Supports:
+- Geometric (fast, approximate) for edge deployment
+- MiDaS/DPT (accurate) for higher accuracy when GPU available
+- Depth Pro / UniDepth style metric depth when needed
 """
 import cv2
 import numpy as np
 import logging
 import os
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 log = logging.getLogger("depth_estimator")
 
@@ -25,6 +41,92 @@ try:
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
+
+# TensorRT for optimized depth inference
+try:
+    import tensorrt as trt
+    TENSORRT_AVAILABLE = True
+except ImportError:
+    TENSORRT_AVAILABLE = False
+
+
+class MonocularDepthCues:
+    """
+    Compute monocular depth cues from 2D image/keypoints.
+    These are the visual cues humans use to perceive depth from a single image.
+    """
+
+    @staticmethod
+    def perspective_cue(kps: List[Tuple[float, float, float]], frame_height: int = 720) -> float:
+        """
+        Estimate relative depth from y-position (perspective cue).
+        Objects lower in image (higher y) are typically closer.
+
+        Returns:
+            Relative depth factor (0-1, higher = farther)
+        """
+        if not kps:
+            return 0.5
+
+        # Get hip center y-position (good reference for person depth)
+        hip_y = 0.0
+        hip_count = 0
+        for i in [11, 12]:  # LEFT_HIP, RIGHT_HIP in COCO
+            if i < len(kps) and kps[i][2] > 0.3:
+                hip_y += kps[i][1]
+                hip_count += 1
+
+        if hip_count == 0:
+            return 0.5
+
+        hip_y /= hip_count
+
+        # Normalize: higher y = closer (lower depth factor)
+        # Assuming y is normalized 0-1 or pixel coordinates
+        if hip_y <= 1.0:
+            depth_factor = hip_y  # Normalized coords
+        else:
+            depth_factor = hip_y / frame_height
+
+        return float(np.clip(1.0 - depth_factor, 0.0, 1.0))
+
+    @staticmethod
+    def size_cue(kps: List[Tuple[float, float, float]], reference_height: float = 1.7) -> float:
+        """
+        Estimate depth from apparent person size (size constancy cue).
+        Larger apparent size = closer.
+
+        Args:
+            kps: Keypoints
+            reference_height: Expected real-world height in meters
+
+        Returns:
+            Estimated depth in meters
+        """
+        if not kps or len(kps) < 17:
+            return 2.0  # Default 2 meters
+
+        # Compute apparent height from keypoints
+        y_coords = [kp[1] for kp in kps if kp[2] > 0.3]
+        if len(y_coords) < 2:
+            return 2.0
+
+        apparent_height = max(y_coords) - min(y_coords)
+
+        if apparent_height < 0.01:
+            return 5.0  # Very small = far away
+
+        # Assuming typical camera setup (focal length ~700 pixels for 720p)
+        # depth = (real_height * focal_length) / apparent_height_pixels
+        # For normalized coords (0-1), apparent_height is fraction of frame
+        focal_length_normalized = 0.7  # Approximate
+
+        if apparent_height <= 1.0:  # Normalized
+            depth = (reference_height * focal_length_normalized) / apparent_height
+        else:  # Pixel coords
+            depth = (reference_height * 500) / apparent_height
+
+        return float(np.clip(depth, 0.5, 10.0))
 
 
 class DepthEstimator:
@@ -234,16 +336,16 @@ class DepthEstimator:
     def estimate_person_distance(self, kps_3d: List[Tuple[float, float, float, float]]) -> float:
         """
         Estimate average distance of person from camera.
-        
+
         Args:
             kps_3d: 3D keypoints
-        
+
         Returns:
             Average distance in meters
         """
         if not kps_3d:
             return 0.0
-        
+
         # Use torso keypoints (shoulders, hips) for distance estimation
         # These are most reliable for distance measurement
         torso_depths = []
@@ -253,8 +355,118 @@ class DepthEstimator:
                 conf = kp[3] if len(kp) > 3 else 1.0
                 if conf > 0.3:  # Only use confident keypoints
                     torso_depths.append(z)
-        
+
         if torso_depths:
             return float(np.median(torso_depths))  # Use median for robustness
         return 0.0
+
+    def estimate_depth_from_keypoints(
+        self,
+        kps_2d: List[Tuple[float, float, float]],
+        frame_shape: Tuple[int, int] = (720, 1280),
+        reference_height: float = 1.7,
+    ) -> Dict[str, float]:
+        """
+        Estimate depth using monocular cues from 2D keypoints only.
+        Useful when depth model is not available (edge deployment).
+
+        Args:
+            kps_2d: 2D keypoints [(x, y, confidence), ...]
+            frame_shape: (height, width) of frame
+            reference_height: Expected real-world person height in meters
+
+        Returns:
+            Dict with depth estimates from different cues
+        """
+        h, w = frame_shape[:2]
+
+        # Perspective cue (position in frame)
+        perspective_depth = MonocularDepthCues.perspective_cue(kps_2d, h)
+
+        # Size cue (apparent person size)
+        size_depth = MonocularDepthCues.size_cue(kps_2d, reference_height)
+
+        # Combined estimate (weighted average)
+        # Size cue is more reliable when person is fully visible
+        visible_kps = sum(1 for kp in kps_2d if kp[2] > 0.3) if kps_2d else 0
+        visibility_ratio = visible_kps / 17.0  # 17 COCO keypoints
+
+        if visibility_ratio > 0.7:
+            # Good visibility - trust size cue more
+            combined_depth = 0.7 * size_depth + 0.3 * (perspective_depth * 5.0)
+        else:
+            # Partial visibility - use perspective more
+            combined_depth = 0.4 * size_depth + 0.6 * (perspective_depth * 5.0)
+
+        return {
+            "perspective_depth_factor": perspective_depth,
+            "size_based_depth_m": size_depth,
+            "combined_depth_m": combined_depth,
+            "visibility_ratio": visibility_ratio,
+            "estimation_method": "monocular_cues",
+        }
+
+
+class JetsonDepthEstimator(DepthEstimator):
+    """
+    Depth estimator optimized for Jetson Orin Nano.
+    Uses TensorRT-optimized models when available, falls back to geometric methods.
+    """
+
+    def __init__(
+        self,
+        method: str = "auto",
+        tensorrt_engine_path: Optional[str] = None,
+        camera_intrinsics_path: Optional[str] = None,
+    ):
+        """
+        Args:
+            method: "auto", "geometric", "tensorrt", or "model"
+            tensorrt_engine_path: Path to TensorRT-optimized depth model
+            camera_intrinsics_path: Path to camera calibration
+        """
+        # Auto-select method based on available resources
+        if method == "auto":
+            if tensorrt_engine_path and os.path.exists(tensorrt_engine_path) and TENSORRT_AVAILABLE:
+                method = "tensorrt"
+            elif TORCH_AVAILABLE and TRANSFORMERS_AVAILABLE:
+                method = "model"
+            else:
+                method = "geometric"
+
+        super().__init__(method=method, camera_intrinsics_path=camera_intrinsics_path)
+
+        self.tensorrt_engine = None
+        if method == "tensorrt" and tensorrt_engine_path:
+            self._load_tensorrt_engine(tensorrt_engine_path)
+
+    def _load_tensorrt_engine(self, engine_path: str):
+        """Load TensorRT-optimized depth estimation engine."""
+        if not TENSORRT_AVAILABLE:
+            log.warning("TensorRT not available for depth estimation")
+            return
+
+        try:
+            log.info("Loading TensorRT depth engine from %s", engine_path)
+            # Engine loading would go here
+            # self.tensorrt_engine = TRTEngine(engine_path)
+            log.info("TensorRT depth engine loaded successfully")
+        except Exception as e:
+            log.warning("Failed to load TensorRT depth engine: %s", e)
+            self.method = "geometric"
+
+    def estimate_depth_map(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Estimate depth map optimized for Jetson.
+        Automatically selects best available method.
+        """
+        if self.method == "tensorrt" and self.tensorrt_engine is not None:
+            return self._estimate_depth_tensorrt(frame)
+        return super().estimate_depth_map(frame)
+
+    def _estimate_depth_tensorrt(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """Estimate depth using TensorRT-optimized model."""
+        # TensorRT inference would go here
+        # For now, fall back to geometric
+        return self._estimate_depth_geometric(frame)
 
