@@ -66,7 +66,11 @@ def compute_respiratory_distress(features):
         if features is None or len(features) < 5:
             return 0.0
         breath_rate_proxy = float(features[4]) * 40.0
-        if breath_rate_proxy < 8.0:
+        # Zero or near-zero means no signal (buffer warming up, occlusion, RTSP
+        # reconnect) — NOT apnea.  Treat as "no data available".
+        if breath_rate_proxy < 0.5:
+            rate_score = 0.0
+        elif breath_rate_proxy < 8.0:
             rate_score = 1.0 - (breath_rate_proxy / 8.0)
         elif breath_rate_proxy > 30.0:
             rate_score = min(1.0, (breath_rate_proxy - 30.0) / 10.0)
@@ -87,17 +91,28 @@ def compute_motor_asymmetry(kps, features):
 
 
 def compute_clinical_alert(agitation_score, delirium_risk, respiratory_distress, hand_proximity_risk, features):
+    """Compute alert level, scoped to 3 high-confidence actionable types.
+
+    HIGH_RISK is reserved for events that demand immediate nurse response:
+      1. Line-tamper  — hand_proximity_risk > threshold (IV/tube pulling)
+      2. Fall         — handled separately in apply_rules (torso_angle + label)
+      3. Bed-exit     — handled separately in apply_rules (policy violation)
+
+    Agitation, delirium, and respiratory scores are still computed for Flink
+    trending and server-side analytics, but they only escalate to MEDIUM_RISK
+    on the edge to prevent alert fatigue.
+    """
     try:
+        # ── HIGH_RISK: only line-tamper (fall + bed-exit handled in apply_rules)
         if hand_proximity_risk > HAND_PROXIMITY_RISK_THRESHOLD:
             return "HIGH_RISK"
-        if respiratory_distress > 0.7:
-            return "HIGH_RISK"
-        if agitation_score > 0.8 or delirium_risk > 0.8:
-            return "HIGH_RISK"
+
+        # ── MEDIUM_RISK: elevated clinical scores (for trending, not paging)
         if agitation_score > 0.5 or delirium_risk > 0.5:
             return "MEDIUM_RISK"
         if respiratory_distress > 0.4:
             return "MEDIUM_RISK"
+
         return "LOW_RISK"
     except Exception:
         return "LOW_RISK"

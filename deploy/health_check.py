@@ -75,13 +75,36 @@ def check_gpu():
 
 
 def check_camera():
-    """Check if camera device exists."""
+    """Check if camera device exists (USB) or RTSP stream is reachable (IP camera)."""
     try:
-        camera_idx = int(os.environ.get("CAMERA_IDX", "0"))
-        # Linux: check /dev/videoN
-        dev_path = f"/dev/video{camera_idx}"
-        if os.path.exists("/dev") and not os.path.exists(dev_path):
-            errors.append(f"Camera device not found: {dev_path}")
+        import yaml
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config", "system.yaml"
+        )
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+
+        camera_url = os.environ.get("CAMERA_URL") or cfg.get("camera_url")
+        if camera_url:
+            # RTSP/IP camera — test TCP connectivity to camera host:port
+            import socket
+            from urllib.parse import urlparse
+            parsed = urlparse(camera_url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 554
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result != 0:
+                errors.append(f"RTSP camera unreachable: {host}:{port}")
+        else:
+            # USB camera — check /dev/videoN
+            camera_idx = int(os.environ.get("CAMERA_IDX", cfg.get("camera_idx", 0)))
+            dev_path = f"/dev/video{camera_idx}"
+            if os.path.exists("/dev") and not os.path.exists(dev_path):
+                errors.append(f"Camera device not found: {dev_path}")
     except Exception as e:
         errors.append(f"Camera check: {e}")
 

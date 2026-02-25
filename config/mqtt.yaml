@@ -1,32 +1,30 @@
 broker: "192.168.1.10"
 port: 1883
-topic_prefix: "hospital/ward1/bed"
+topic_prefix: "eam"  # Topics: eam/{device_id}/events, /alerts, /heartbeat, /hourly
 qos: 1
-compress_payload: true
+connection_timeout: 5
 
-# Authentication (use env vars EAM_MQTT_USERNAME / EAM_MQTT_PASSWORD for credentials)
-# username and password are read from environment by mqtt_client.py
+# Authentication (credentials via env vars: EAM_MQTT_USERNAME / EAM_MQTT_PASSWORD)
 use_authentication: true
 
 # TLS/SSL Configuration (enable for production)
 # Set use_tls: true and provide certificate paths for encrypted MQTT
-use_tls: false  # Set to true for production deployment
+use_tls: false  # Set to true for production (port changes to 8883 automatically)
 tls:
   ca_cert: null      # Path to CA certificate (e.g., /opt/eam/certs/ca.crt)
   client_cert: null   # Path to client certificate (optional, for mutual TLS)
   client_key: null    # Path to client private key (optional, for mutual TLS)
   tls_version: "tlsv1.2"  # Minimum TLS version
+  insecure: false     # Set to true to skip hostname verification (self-signed certs only)
 
-# MQTT Broker Message Retention (server-side settings)
-# Note: These settings must be configured on the MQTT broker itself
-# This section documents the expected broker configuration
+# Alert deduplication — same alert type is suppressed for this window (seconds)
+# Prevents Flink from processing 15 identical alerts/sec when condition persists
+alert_dedup_seconds: 30.0
+
+# MQTT Broker Configuration (server-side — documented here for reference)
+# These must be configured on the EMQX/HiveMQ broker, not the client.
 broker_retention:
-  # Session persistence for durable subscriptions
   persistent_session: true
-  # Message retention (in seconds) - set to 0 for no retention, -1 for unlimited
-  # Recommended: 86400 seconds (24 hours) for real-time clinical data
-  message_retention_seconds: 86400
-  # Maximum queue size per client (prevents memory overflow)
+  message_retention_seconds: 86400  # 24 hours
   max_queued_messages: 1000
-  # Clean session on disconnect (false = keep subscriptions/messages)
   clean_session: false

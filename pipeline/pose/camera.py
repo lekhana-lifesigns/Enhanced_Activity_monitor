@@ -1,4 +1,5 @@
 # pipeline/pose/camera.py
+import os
 import cv2
 import sys
 import time
@@ -7,6 +8,9 @@ import numpy as np
 from typing import Optional, Tuple, List
 
 log = logging.getLogger("camera")
+
+# Force TCP transport for RTSP (more reliable than UDP on direct LAN)
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 
 def _build_gstreamer_pipeline(sensor_id, width, height, fps, flip_method=0):
@@ -23,23 +27,37 @@ def _build_gstreamer_pipeline(sensor_id, width, height, fps, flip_method=0):
 
 class Camera:
     def __init__(self, index=0, resolution=(1280, 720), fps=15, enable_zoom=True,
-                 use_gstreamer=False, flip_method=0):
+                 use_gstreamer=False, flip_method=0, url=None):
         """
-        Initialize camera. Supports USB cameras (default) and Jetson CSI via GStreamer.
+        Initialize camera.  Supports USB, Jetson CSI (GStreamer), and RTSP/IP cameras.
 
         Args:
-            index: Camera index (USB) or sensor-id (CSI)
-            resolution: (width, height)
+            index: Camera index (USB) or sensor-id (CSI).  Ignored when *url* is set.
+            resolution: (width, height) — applied for USB only; RTSP uses stream resolution.
             fps: Target frame rate
             enable_zoom: Enable digital zoom features
             use_gstreamer: Use GStreamer pipeline for Jetson CSI cameras
             flip_method: CSI flip (0=none, 2=rotate-180) — only for GStreamer mode
+            url: RTSP/HTTP stream URL (e.g. "rtsp://admin:pass@192.168.1.108:554/...").
+                 When provided, *index* and *use_gstreamer* are ignored.
         """
         self.index = index
         self.original_resolution = tuple(resolution)
         self.use_gstreamer = use_gstreamer
+        self.url = url
+        self._consecutive_failures = 0
+        self._max_failures_before_reconnect = 5
+        self._reconnect_cooldown = 3.0  # seconds between reconnect attempts
+        self._last_reconnect = 0.0
 
-        if use_gstreamer and sys.platform == "linux":
+        if url:
+            # ── RTSP / IP camera ──────────────────────────────────────
+            log.info("Opening RTSP/IP camera: %s", url.split("@")[-1])  # log without credentials
+            self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            # Minimise RTSP frame buffer — always read the latest frame, not queued stale ones
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.use_gstreamer = False
+        elif use_gstreamer and sys.platform == "linux":
             gst_str = _build_gstreamer_pipeline(
                 index, resolution[0], resolution[1], fps, flip_method
             )
@@ -57,11 +75,14 @@ class Camera:
         time.sleep(0.2)  # allow warm-up
 
         if not self.cap.isOpened():
-            raise RuntimeError(f"Camera {index} could not be opened")
-        mode = "CSI/GStreamer" if self.use_gstreamer else "USB"
-        log.info("Camera %d opened (%s) at %s @ %d FPS", index, mode, resolution, fps)
-        self.last=time.time()
-        self.fps=fps
+            source = url.split("@")[-1] if url else index
+            raise RuntimeError(f"Camera {source} could not be opened")
+
+        mode = "RTSP" if url else ("CSI/GStreamer" if self.use_gstreamer else "USB")
+        source_id = url.split("@")[-1] if url else str(index)
+        log.info("Camera opened (%s) source=%s at %s @ %d FPS", mode, source_id, resolution, fps)
+        self.last = time.time()
+        self.fps = fps
         
         # Zoom settings
         self.enable_zoom = enable_zoom
@@ -328,11 +349,61 @@ class Camera:
         self.digital_zoom_enabled = False
         log.info("Zoom reset to default")
 
+    def _reconnect(self):
+        """Attempt to re-open the camera/stream after consecutive failures."""
+        now = time.time()
+        if now - self._last_reconnect < self._reconnect_cooldown:
+            return False  # still in cooldown
+        self._last_reconnect = now
+        log.warning("Attempting camera reconnect...")
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+        try:
+            if self.url:
+                self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            elif self.use_gstreamer and sys.platform == "linux":
+                gst_str = _build_gstreamer_pipeline(
+                    self.index, self.original_resolution[0],
+                    self.original_resolution[1], self.fps, 0
+                )
+                self.cap = cv2.VideoCapture(gst_str, cv2.CAP_GSTREAMER)
+            else:
+                self.cap = cv2.VideoCapture(self.index)
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.original_resolution[0])
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.original_resolution[1])
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+            time.sleep(0.5)
+            if self.cap.isOpened():
+                log.info("Camera reconnected successfully")
+                self._consecutive_failures = 0
+                return True
+        except Exception as e:
+            log.warning("Camera reconnect failed: %s", e)
+        return False
+
     def read(self):
-        """Reads a valid frame, retries if needed. Returns None on failure."""
-        for _ in range(5):
-            ret, frame = self.cap.read()
+        """Reads a valid frame, retries if needed.  Returns None on failure.
+
+        For RTSP streams, stale buffered frames are drained via grab() so the
+        retrieved frame is as close to real-time as possible.  After several
+        consecutive failures the stream is automatically re-opened.
+        """
+        for attempt in range(5):
+            try:
+                # For RTSP: drain buffer — grab() discards, retrieve() decodes the latest
+                if self.url:
+                    self.cap.grab()  # discard stale buffered frame
+                ret, frame = self.cap.read()
+            except Exception:
+                ret, frame = False, None
+
             if ret and frame is not None:
+                self._consecutive_failures = 0
                 # Apply digital zoom if enabled
                 if self.digital_zoom_enabled and self.zoom_level > 1.0:
                     frame = self.apply_digital_zoom(frame)
@@ -340,7 +411,13 @@ class Camera:
 
             time.sleep(0.05)
 
-        log.warning("Camera read failed after retries, returning None")
+        # All retries exhausted
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._max_failures_before_reconnect:
+            self._reconnect()
+
+        log.warning("Camera read failed after retries (failures=%d), returning None",
+                    self._consecutive_failures)
         return None  # Graceful failure instead of exception
 
     def release(self):

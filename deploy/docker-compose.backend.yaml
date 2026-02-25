@@ -15,15 +15,17 @@ services:
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
-      - DATABASE_URL=postgresql+asyncpg://eam:${POSTGRES_PASSWORD}@postgres:5432/eam
+      - DATABASE_URL=postgresql+asyncpg://eam:${POSTGRES_PASSWORD}@timescaledb:5432/eam
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - MQTT_BROKER=mqtt
+      - MQTT_BROKER=emqx
       - MQTT_PORT=1883
       - SECRET_KEY=${SECRET_KEY}
     depends_on:
-      postgres:
+      timescaledb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      emqx:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -37,19 +39,21 @@ services:
       - api-logs:/app/logs
 
   # ============================================
-  # PostgreSQL Database
+  # TimescaleDB (replaces plain PostgreSQL)
+  # Time-series optimized for device metrics at scale
   # ============================================
-  postgres:
-    image: postgres:15-alpine
-    container_name: eam-postgres
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: eam-timescaledb
     restart: unless-stopped
     environment:
       - POSTGRES_USER=eam
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=eam
+      - TIMESCALEDB_TELEMETRY=off
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - timescaledb-data:/var/lib/postgresql/data
+      - ./init-timescaledb.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U eam -d eam"]
       interval: 10s
@@ -59,6 +63,18 @@ services:
       - eam-network
     ports:
       - "5432:5432"
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
 
   # ============================================
   # Redis (Caching & Rate Limiting)
@@ -81,28 +97,114 @@ services:
       - "6379:6379"
 
   # ============================================
-  # MQTT Broker (Eclipse Mosquitto)
+  # EMQX MQTT Broker (replaces Mosquitto)
+  # Supports shared subscriptions, 10M+ connections, built-in auth
   # ============================================
-  mqtt:
-    image: eclipse-mosquitto:2
-    container_name: eam-mqtt
+  emqx:
+    image: emqx/emqx:5.4
+    container_name: eam-emqx
     restart: unless-stopped
+    environment:
+      - EMQX_NAME=emqx
+      - EMQX_HOST=emqx.eam.local
+      - EMQX_DASHBOARD_PASSWORD=${EMQX_DASHBOARD_PASSWORD:-admin_changeme}
+      - EMQX_LOADED_PLUGINS=emqx_prometheus
     volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/password.txt:/mosquitto/config/password.txt:ro
-      - mqtt-data:/mosquitto/data
-      - mqtt-logs:/mosquitto/log
+      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
     ports:
-      - "1883:1883"
-      - "8883:8883"
-      - "9001:9001"
+      - "1883:1883"     # MQTT TCP
+      - "8883:8883"     # MQTT TLS
+      - "8083:8083"     # MQTT WebSocket
+      - "8084:8084"     # MQTT WebSocket TLS
+      - "18083:18083"   # EMQX Dashboard
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck"]
-      interval: 30s
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 15s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 30s
     networks:
       - eam-network
+
+  # ============================================
+  # Apache Flink JobManager
+  # Coordinates Flink jobs (windowed aggregation, alert enrichment,
+  # cross-device correlation)
+  # ============================================
+  flink-jobmanager:
+    image: flink:1.18-java11
+    container_name: eam-flink-jobmanager
+    restart: unless-stopped
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.savepoints.dir: file:///opt/flink/savepoints
+        execution.checkpointing.interval: 60s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        rest.flamegraph.enabled: true
+      - MQTT_BROKER=emqx
+      - MQTT_PORT=1883
+      - MQTT_USERNAME=flink
+      - MQTT_PASSWORD=${FLINK_MQTT_PASSWORD}
+      - TIMESCALE_URL=postgresql://eam:${POSTGRES_PASSWORD}@timescaledb:5432/eam
+      - NURSE_CALL_API=${NURSE_CALL_API}
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+      - flink-savepoints:/opt/flink/savepoints
+      - ../flink/jobs:/opt/flink/usrlib/jobs:ro
+    ports:
+      - "8081:8081"     # Flink Web UI
+    depends_on:
+      emqx:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - eam-network
+
+  # ============================================
+  # Apache Flink TaskManager(s)
+  # Executes Flink job slots (scale with replicas)
+  # ============================================
+  flink-taskmanager:
+    image: flink:1.18-java11
+    container_name: eam-flink-taskmanager
+    restart: unless-stopped
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2g
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+      - MQTT_BROKER=emqx
+      - MQTT_PORT=1883
+      - MQTT_USERNAME=flink
+      - MQTT_PASSWORD=${FLINK_MQTT_PASSWORD}
+      - TIMESCALE_URL=postgresql://eam:${POSTGRES_PASSWORD}@timescaledb:5432/eam
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+      - ../flink/jobs:/opt/flink/usrlib/jobs:ro
+    depends_on:
+      - flink-jobmanager
+    networks:
+      - eam-network
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
 
   # ============================================
   # Nginx API Gateway
@@ -166,6 +268,7 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+      - timescaledb
     networks:
       - eam-network
 
@@ -183,10 +286,12 @@ networks:
 # Volumes
 # ============================================
 volumes:
-  postgres-data:
+  timescaledb-data:
   redis-data:
-  mqtt-data:
-  mqtt-logs:
+  emqx-data:
+  emqx-log:
+  flink-checkpoints:
+  flink-savepoints:
   api-logs:
   nginx-logs:
   prometheus-data:

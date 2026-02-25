@@ -13,16 +13,18 @@ datasources:
       timeInterval: "15s"
       httpMethod: POST
 
-  - name: PostgreSQL
+  - name: TimescaleDB
     type: postgres
-    url: postgres:5432
+    url: timescaledb:5432
     database: eam
-    user: eam
+    user: eam_readonly
     secureJsonData:
-      password: ${POSTGRES_PASSWORD}
+      password: readonly_changeme
     jsonData:
       sslmode: disable
       maxOpenConns: 10
       maxIdleConns: 5
       connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: true
     editable: false

@@ -3,52 +3,85 @@ import sqlite3
 import json
 import os
 import logging
+import threading
 from datetime import timedelta
 
 log = logging.getLogger("db")
 
 DB_PATH = "storage/events.db"
 
+
+class _ThreadLocalConnection:
+    """Thread-local SQLite connection pool.
+
+    Each thread gets its own connection, avoiding the data-corruption risk of
+    sharing a single ``sqlite3.Connection`` across threads.  WAL mode allows
+    concurrent readers alongside a single writer.
+    """
+
+    def __init__(self, path: str, enable_wal: bool = True):
+        self._path = path
+        self._enable_wal = enable_wal
+        self._local = threading.local()
+
+    def get(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._path)
+            if self._enable_wal:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA cache_size=-10000")
+                conn.execute("PRAGMA mmap_size=67108864")
+                conn.execute("PRAGMA temp_store=MEMORY")
+            self._local.conn = conn
+        return conn
+
+    def close_all(self):
+        """Close the connection for the calling thread."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+
+
 class LocalDB:
     def __init__(self, path=DB_PATH, enable_wal=True):
         """
         Initialize local SQLite database for event storage.
+
+        Uses per-thread connections to avoid data corruption from concurrent
+        access.  WAL mode is enabled for read concurrency.
 
         Args:
             path: Database file path
             enable_wal: Enable WAL mode for better concurrency (SSD optimized)
         """
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.path = path
+        self._pool = _ThreadLocalConnection(path, enable_wal)
 
-        # ══════════════════════════════════════════════════════════════════
-        # SSD OPTIMIZATION: WAL mode + PRAGMA settings for edge deployment
-        # ══════════════════════════════════════════════════════════════════
+        # Legacy attribute kept for any code that accesses self.conn directly
+        self.conn = self._pool.get()
+
         if enable_wal:
-            try:
-                # WAL mode: Better concurrency, reduced write amplification
-                self.conn.execute("PRAGMA journal_mode=WAL")
-                # Synchronous NORMAL: Balance between safety and performance
-                # FULL is safer but slower; OFF is fastest but risky
-                self.conn.execute("PRAGMA synchronous=NORMAL")
-                # Larger cache for better read performance (10MB)
-                self.conn.execute("PRAGMA cache_size=-10000")
-                # Memory-mapped I/O for faster reads (64MB)
-                self.conn.execute("PRAGMA mmap_size=67108864")
-                # Temp store in memory (faster, uses RAM)
-                self.conn.execute("PRAGMA temp_store=MEMORY")
-                log.info("SQLite WAL mode enabled with SSD optimizations")
-            except Exception as e:
-                log.warning("Failed to enable WAL mode: %s", e)
+            log.info("SQLite WAL mode enabled with SSD optimizations")
 
         self._create()
         log.info("Local database initialized: %s", path)
 
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """Return a connection for the current thread."""
+        return self._pool.get()
+
     def _create(self):
         """Create all tables from schema if they don't exist."""
         # Events table
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts REAL NOT NULL,
@@ -60,7 +93,7 @@ class LocalDB:
         )""")
         
         # Alerts table
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts REAL NOT NULL,
@@ -78,7 +111,7 @@ class LocalDB:
         )""")
         
         # System health table
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS system_health (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts REAL NOT NULL,
@@ -93,7 +126,7 @@ class LocalDB:
         )""")
         
         # Patient sessions table (multi-device patient tracking)
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS patient_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id TEXT NOT NULL,
@@ -107,7 +140,7 @@ class LocalDB:
         )""")
 
         # Audit log table (HIPAA compliance)
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts REAL NOT NULL,
@@ -120,7 +153,7 @@ class LocalDB:
         )""")
 
         # Patient consent table (GDPR / data governance)
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS patient_consent (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id TEXT NOT NULL,
@@ -133,7 +166,7 @@ class LocalDB:
         )""")
 
         # Patient baselines table (DBSCAN + PCA models per patient)
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS patient_baselines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id TEXT NOT NULL,
@@ -149,7 +182,7 @@ class LocalDB:
         )""")
 
         # Hourly aggregates table (efficient reporting)
-        self.conn.execute("""
+        self._conn.execute("""
         CREATE TABLE IF NOT EXISTS hourly_aggregates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             hour_start REAL NOT NULL,
@@ -191,25 +224,25 @@ class LocalDB:
         )""")
 
         # Create indexes
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_device ON events(device)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_label ON events(label)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_device ON alerts(device)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_level ON alerts(alert_level)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_health_ts ON system_health(ts)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_health_device ON system_health(device_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_patient ON patient_sessions(patient_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device ON patient_sessions(device_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON patient_sessions(status)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_patient ON audit_log(patient_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_consent_patient ON patient_consent(patient_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_baselines_patient ON patient_baselines(patient_id, device_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_device_time ON hourly_aggregates(device_id, hour_start)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_patient ON hourly_aggregates(patient_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_device ON events(device)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_label ON events(label)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_device ON alerts(device)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_level ON alerts(alert_level)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_health_ts ON system_health(ts)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_health_device ON system_health(device_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_patient ON patient_sessions(patient_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device ON patient_sessions(device_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON patient_sessions(status)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_patient ON audit_log(patient_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_consent_patient ON patient_consent(patient_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_baselines_patient ON patient_baselines(patient_id, device_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_device_time ON hourly_aggregates(device_id, hour_start)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_patient ON hourly_aggregates(patient_id)")
 
-        self.conn.commit()
+        self._conn.commit()
 
     def _build_where_clause(self, device=None, start_ts=None, end_ts=None, extra_filters=None):
         """Build WHERE clause with common filters."""
@@ -270,11 +303,11 @@ class LocalDB:
             # Clean payload for JSON serialization
             clean_payload = convert_to_serializable(payload)
             
-            self.conn.execute(
+            self._conn.execute(
                 "INSERT INTO events (ts, device, label, confidence, payload) VALUES (?,?,?,?,?)",
                 (ts, device, label, float(confidence), json.dumps(clean_payload))
             )
-            self.conn.commit()
+            self._conn.commit()
         except sqlite3.OperationalError as e:
             error_msg = str(e).lower()
             if "disk" in error_msg or "full" in error_msg or "space" in error_msg:
@@ -302,7 +335,7 @@ class LocalDB:
         params.append(limit)
         
         try:
-            cursor = self.conn.execute(query, params)
+            cursor = self._conn.execute(query, params)
             events = []
             for row in cursor:
                 events.append({
@@ -327,9 +360,9 @@ class LocalDB:
         import time
         cutoff_ts = time.time() - (days * 24 * 60 * 60)
         try:
-            cursor = self.conn.execute("DELETE FROM events WHERE ts < ?", (cutoff_ts,))
+            cursor = self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff_ts,))
             deleted = cursor.rowcount
-            self.conn.commit()
+            self._conn.commit()
             log.info("Deleted %d old events (older than %d days)", deleted, days)
             return deleted
         except Exception as e:
@@ -363,36 +396,36 @@ class LocalDB:
         try:
             # Events cleanup
             cutoff = now - (events_days * 86400)
-            cursor = self.conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            cursor = self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
             results["events"] = cursor.rowcount
 
             # Alerts cleanup (longer retention for clinical review)
             cutoff = now - (alerts_days * 86400)
-            cursor = self.conn.execute("DELETE FROM alerts WHERE ts < ?", (cutoff,))
+            cursor = self._conn.execute("DELETE FROM alerts WHERE ts < ?", (cutoff,))
             results["alerts"] = cursor.rowcount
 
             # System health cleanup
             cutoff = now - (health_days * 86400)
-            cursor = self.conn.execute("DELETE FROM system_health WHERE ts < ?", (cutoff,))
+            cursor = self._conn.execute("DELETE FROM system_health WHERE ts < ?", (cutoff,))
             results["system_health"] = cursor.rowcount
 
             # Audit log cleanup (HIPAA: minimum 6 years, we use 1 year default)
             cutoff = now - (audit_days * 86400)
-            cursor = self.conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+            cursor = self._conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
             results["audit_log"] = cursor.rowcount
 
             # Hourly aggregates cleanup (keep 90 days for reporting)
             cutoff = now - (90 * 86400)
-            cursor = self.conn.execute("DELETE FROM hourly_aggregates WHERE hour_start < ?", (cutoff,))
+            cursor = self._conn.execute("DELETE FROM hourly_aggregates WHERE hour_start < ?", (cutoff,))
             results["hourly_aggregates"] = cursor.rowcount
 
-            self.conn.commit()
+            self._conn.commit()
 
             # VACUUM to reclaim disk space (SSD optimization)
             total_deleted = sum(results.values())
             if total_deleted > 1000:
                 try:
-                    self.conn.execute("VACUUM")
+                    self._conn.execute("VACUUM")
                     log.info("Database vacuumed after cleanup (%d rows deleted)", total_deleted)
                 except Exception as e:
                     log.debug("VACUUM failed (may be in transaction): %s", e)
@@ -427,13 +460,13 @@ class LocalDB:
         """Insert alert into database."""
         try:
             ts = payload.get("ts", payload.get("timestamp", 0.0)) if payload else 0.0
-            self.conn.execute("""
+            self._conn.execute("""
                 INSERT INTO alerts (ts, device, alert_level, label, agitation_score, 
                                   delirium_risk, respiratory_distress, hand_proximity_risk, payload)
                 VALUES (?,?,?,?,?,?,?,?,?)
             """, (ts, device, alert_level, label, agitation_score, delirium_risk,
                   respiratory_distress, hand_proximity_risk, json.dumps(payload) if payload else None))
-            self.conn.commit()
+            self._conn.commit()
         except Exception as e:
             log.exception("Failed to insert alert: %s", e)
 
@@ -444,7 +477,7 @@ class LocalDB:
         params.append(limit)
         
         try:
-            cursor = self.conn.execute(query, params)
+            cursor = self._conn.execute(query, params)
             alerts = []
             for row in cursor:
                 alerts.append({
@@ -469,11 +502,11 @@ class LocalDB:
         """Acknowledge an alert."""
         try:
             from datetime import datetime
-            self.conn.execute(
+            self._conn.execute(
                 "UPDATE alerts SET acknowledged = 1, acknowledged_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), alert_id)
             )
-            self.conn.commit()
+            self._conn.commit()
             log.info("Alert %d acknowledged", alert_id)
         except Exception as e:
             log.exception("Failed to acknowledge alert: %s", e)
@@ -496,7 +529,7 @@ class LocalDB:
         query += " ORDER BY start_ts DESC"
         
         try:
-            cursor = self.conn.execute(query, params)
+            cursor = self._conn.execute(query, params)
             sessions = []
             for row in cursor:
                 sessions.append({
@@ -527,7 +560,7 @@ class LocalDB:
             FROM events""" + where
         
         try:
-            cursor = self.conn.execute(query, params)
+            cursor = self._conn.execute(query, params)
             row = cursor.fetchone()
             if row:
                 # Handle None values from AVG() when no rows match
@@ -558,7 +591,7 @@ class LocalDB:
             FROM alerts""" + where + " GROUP BY alert_level"
         
         try:
-            cursor = self.conn.execute(query, params)
+            cursor = self._conn.execute(query, params)
             stats = {}
             for row in cursor:
                 stats[row[0]] = {
@@ -577,12 +610,12 @@ class LocalDB:
         """Start a new patient session."""
         import time as _time
         try:
-            self.conn.execute(
+            self._conn.execute(
                 "INSERT INTO patient_sessions (patient_id, device_id, bed_id, start_ts, status, metadata) VALUES (?,?,?,?,?,?)",
                 (patient_id, device_id, bed_id or device_id, _time.time(), 'active',
                  json.dumps(metadata) if metadata else None)
             )
-            self.conn.commit()
+            self._conn.commit()
             log.info("Patient session started: %s on %s", patient_id, device_id)
         except Exception as e:
             log.exception("Failed to insert patient session: %s", e)
@@ -596,8 +629,8 @@ class LocalDB:
             if device_id:
                 query += " AND device_id = ?"
                 params.append(device_id)
-            self.conn.execute(query, params)
-            self.conn.commit()
+            self._conn.execute(query, params)
+            self._conn.commit()
             log.info("Patient session ended: %s", patient_id)
         except Exception as e:
             log.exception("Failed to end patient session: %s", e)
@@ -606,11 +639,11 @@ class LocalDB:
         """Insert audit log entry (HIPAA compliance)."""
         import time as _time
         try:
-            self.conn.execute(
+            self._conn.execute(
                 "INSERT INTO audit_log (ts, action, user_id, patient_id, details, ip_address) VALUES (?,?,?,?,?,?)",
                 (_time.time(), action, user_id, patient_id, details, ip_address)
             )
-            self.conn.commit()
+            self._conn.commit()
         except Exception as e:
             log.exception("Failed to insert audit log: %s", e)
 
@@ -624,7 +657,7 @@ class LocalDB:
         try:
             from datetime import datetime
             now = datetime.now().isoformat()
-            self.conn.execute("""
+            self._conn.execute("""
                 INSERT INTO patient_baselines
                     (patient_id, device_id, baseline_type, model_blob,
                      n_samples, n_clusters, fit_count, created_at, updated_at)
@@ -638,7 +671,7 @@ class LocalDB:
                     updated_at = excluded.updated_at
             """, (patient_id, device_id, baseline_type, model_blob,
                   n_samples, n_clusters, fit_count, now, now))
-            self.conn.commit()
+            self._conn.commit()
             log.info("Baseline saved: patient=%s device=%s type=%s (%d samples, %d clusters)",
                      patient_id, device_id, baseline_type, n_samples, n_clusters)
         except Exception as e:
@@ -647,7 +680,7 @@ class LocalDB:
     def load_baseline(self, patient_id, device_id, baseline_type="features"):
         """Load a patient baseline model. Returns model_blob bytes or None."""
         try:
-            cursor = self.conn.execute(
+            cursor = self._conn.execute(
                 "SELECT model_blob, n_samples, n_clusters, fit_count, updated_at "
                 "FROM patient_baselines WHERE patient_id = ? AND device_id = ? AND baseline_type = ?",
                 (patient_id, device_id, baseline_type)
@@ -671,11 +704,11 @@ class LocalDB:
     def delete_baseline(self, patient_id, device_id, baseline_type="features"):
         """Delete a patient baseline model."""
         try:
-            self.conn.execute(
+            self._conn.execute(
                 "DELETE FROM patient_baselines WHERE patient_id = ? AND device_id = ? AND baseline_type = ?",
                 (patient_id, device_id, baseline_type)
             )
-            self.conn.commit()
+            self._conn.commit()
             log.info("Baseline deleted: patient=%s device=%s type=%s",
                      patient_id, device_id, baseline_type)
         except Exception as e:
@@ -699,7 +732,7 @@ class LocalDB:
             else:
                 data = metrics
 
-            self.conn.execute("""
+            self._conn.execute("""
                 INSERT INTO hourly_aggregates (
                     hour_start, hour_end, device_id, patient_id,
                     total_frames, frames_with_person, total_observation_seconds,
@@ -783,7 +816,7 @@ class LocalDB:
                 data.get("avg_pose_confidence", 0),
                 data.get("keypoint_visibility_pct", 0),
             ))
-            self.conn.commit()
+            self._conn.commit()
             log.debug("Hourly aggregate saved: device=%s hour=%s",
                      data.get("device_id"), data.get("hour_start"))
         except Exception as e:
@@ -830,7 +863,7 @@ class LocalDB:
         params.append(limit)
 
         try:
-            cursor = self.conn.execute(query, params)
+            cursor = self._conn.execute(query, params)
             columns = [desc[0] for desc in cursor.description]
             results = []
 
@@ -931,9 +964,9 @@ class LocalDB:
             return {}
 
     def close(self):
-        """Close database connection."""
+        """Close database connection for the calling thread."""
         try:
-            self.conn.close()
+            self._pool.close_all()
             log.info("Database connection closed")
         except Exception:
             pass

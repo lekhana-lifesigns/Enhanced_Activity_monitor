@@ -174,9 +174,11 @@ class TemporalModelEnhanced:
     """
 
     def __init__(self, model_path=None, window_size=48, labels=None,
-                 use_pytorch=True, device="cpu", use_fp16=False):
+                 use_pytorch=True, device="cpu", use_fp16=False,
+                 feature_dim=145):
         self.model_path = model_path
         self.window_size = window_size
+        self._configured_input_dim = feature_dim
         self.labels = labels or [
             "calm",
             "agitation",
@@ -243,7 +245,7 @@ class TemporalModelEnhanced:
                 else:
                     # No trained weights — initialize structure only
                     self.pytorch_model = OptimizedTemporalModel(
-                        input_dim=9,
+                        input_dim=self._configured_input_dim,
                         hidden_dim=64,
                         num_classes=len(self.labels),
                         num_heads=2,

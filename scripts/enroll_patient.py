@@ -67,10 +67,12 @@ def main():
     # Initialize components
     cam_res = tuple(cfg.get("camera_resolution", (1280, 720)))
     fps = cfg.get("camera_fps", 15)
+    camera_url = cfg.get("camera_url")
     camera = Camera(
         index=args.camera, resolution=cam_res, fps=fps,
         use_gstreamer=cfg.get("use_gstreamer", False),
         flip_method=cfg.get("camera_flip_method", 0),
+        url=camera_url,
     )
 
     face_recognizer = PatientFaceRecognizer(

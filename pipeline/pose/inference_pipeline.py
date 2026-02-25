@@ -29,10 +29,27 @@ class InferencePipeline:
         camres = tuple(cfg.get("camera_resolution", (1280, 720)))
         fps = cfg.get("camera_fps", 15)
 
+        # Resolve device with automatic CUDA fallback
+        requested_device = cfg.get("device", "cpu")
+        if requested_device == "cuda":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    log.warning("CUDA requested but not available (torch.cuda.is_available()=False). "
+                                "Falling back to CPU. Install Jetson-specific PyTorch from "
+                                "developer.nvidia.com for GPU acceleration.")
+                    cfg["device"] = "cpu"
+            except ImportError:
+                log.warning("PyTorch not installed, falling back to CPU")
+                cfg["device"] = "cpu"
+
+        # camera_url takes priority over camera_idx (RTSP/IP vs USB/CSI)
+        camera_url = cfg.get("camera_url")
         self.camera = Camera(
             index=cfg.get("camera_idx", 0), resolution=camres, fps=fps,
             use_gstreamer=cfg.get("use_gstreamer", False),
             flip_method=cfg.get("camera_flip_method", 0),
+            url=camera_url,
         )
         models = cfg.get("models", {})
         
@@ -96,12 +113,14 @@ class InferencePipeline:
             try:
                 device = cfg.get("device", "cpu")
                 use_fp16 = cfg.get("temporal_use_fp16", False)
+                feature_dim = cfg.get("feature_dim", 145)
                 self.temporal = TemporalModelEnhanced(
                     model_path=models.get("temporal"),
                     window_size=window_size,
                     use_pytorch=True,
                     device=device,
                     use_fp16=use_fp16,
+                    feature_dim=feature_dim,
                 )
                 # Wire temporal stride from config
                 self.temporal._prediction_stride = cfg.get("temporal_prediction_stride", 1)
@@ -141,10 +160,14 @@ class InferencePipeline:
                 )
                 
                 # Use hybrid if enabled
+                enable_graph = cfg.get("enable_graph_features", True)
                 if cfg.get("use_hybrid_features", True):
                     self.feature_encoder = HybridFeatureExtractor(
                         learned_extractor=learned_extractor,
-                        handcrafted_extractor=ICUFeatureEncoder(window_size=window_size, fps=fps)
+                        handcrafted_extractor=ICUFeatureEncoder(
+                            window_size=window_size, fps=fps,
+                            enable_graph_features=enable_graph,
+                        )
                     )
                     log.info("Using hybrid feature extractor (learned + handcrafted)")
                 else:
@@ -152,9 +175,15 @@ class InferencePipeline:
                     log.info("Using learned feature extractor (method: %s)", learned_method)
             except Exception as e:
                 log.warning("Failed to initialize learned features: %s, using handcrafted", e)
-                self.feature_encoder = ICUFeatureEncoder(window_size=window_size, fps=fps)
+                self.feature_encoder = ICUFeatureEncoder(
+                    window_size=window_size, fps=fps,
+                    enable_graph_features=cfg.get("enable_graph_features", True),
+                )
         else:
-            self.feature_encoder = ICUFeatureEncoder(window_size=window_size, fps=fps)
+            self.feature_encoder = ICUFeatureEncoder(
+                window_size=window_size, fps=fps,
+                enable_graph_features=cfg.get("enable_graph_features", True),
+            )
         
         # Initialize keypoint window for learned features
         # TODO-040: Frame buffer management (use deque with maxlen)
@@ -377,6 +406,65 @@ class InferencePipeline:
             log.debug("Activity smoother not available: %s", e)
             self.activity_smoother = None
 
+        # ── Hourly Aggregator (per-frame → hourly summaries for Flink) ──
+        self._hourly_aggregator = None
+        try:
+            from analytics.hourly_aggregator import HourlyAggregator
+            device_id = cfg.get("device_id", "bed_01")
+            patient_id = cfg.get("patient", {}).get("id", "unknown")
+            self._hourly_aggregator = HourlyAggregator(
+                device_id=device_id,
+                patient_id=patient_id,
+                auto_flush=False,  # eac.py controls flush timing
+            )
+            log.info("Hourly aggregator enabled (device=%s)", device_id)
+        except Exception as e:
+            log.warning("Failed to initialize hourly aggregator: %s", e)
+
+        # ── Video2IMU converter (keypoints → IMU-like signals) ──────────
+        self._video2imu = None
+        if cfg.get("enable_video2imu", False):
+            try:
+                from pipeline.pose.video2imu_converter import Video2IMUConverter
+                v2i_cfg = cfg.get("video2imu", {})
+                self._video2imu = Video2IMUConverter(
+                    window_size=window_size,
+                    fps=fps,
+                    lowpass_cutoff=v2i_cfg.get("lowpass_cutoff", 12.0),
+                    gravity_removal=v2i_cfg.get("gravity_removal", True),
+                    reference_point=v2i_cfg.get("reference_point", "hip"),
+                )
+                log.info("Video2IMU converter enabled (ref=%s)", v2i_cfg.get("reference_point", "hip"))
+            except Exception as e:
+                log.warning("Failed to initialize Video2IMU: %s", e)
+
+        # ── Depth estimator (for 3D pose upgrade) ──────────────────────
+        self.depth_estimator = None
+        if cfg.get("use_3d_analysis", False):
+            try:
+                from pipeline.depth.depth_estimator import DepthEstimator
+                depth_method = cfg.get("depth_method", "geometric")
+                self.depth_estimator = DepthEstimator(method=depth_method)
+                log.info("Depth estimator enabled (method=%s)", depth_method)
+            except Exception as e:
+                log.warning("Failed to initialize depth estimator: %s", e)
+
+        # ── Jetson GPU Optimizer ──────────────────────────────────────
+        self._jetson_optimizer = None
+        if cfg.get("enable_jetson_optimizer", False):
+            try:
+                from pipeline.pose.jetson_gpu_optimizer import create_jetson_optimizer
+                self._jetson_optimizer = create_jetson_optimizer({
+                    "target_fps": fps,
+                    "enable_thermal_management": True,
+                    "enable_dynamic_precision": True,
+                    "default_precision": "fp16",
+                })
+                self._jetson_optimizer.start()
+                log.info("JetsonOptimizer enabled (target_fps=%d)", fps)
+            except Exception as e:
+                log.warning("Failed to initialize JetsonOptimizer: %s", e)
+
         # TODO-033: Model warmup
         self._warmup_models()
 
@@ -396,6 +484,10 @@ class InferencePipeline:
                 log.info("Loaded baseline from DB for patient=%s", patient_id)
         except Exception as e:
             log.debug("No saved baseline found: %s", e)
+
+    def get_hourly_aggregator(self):
+        """Return the hourly aggregator (used by eac.py for Flink publishing)."""
+        return self._hourly_aggregator
 
     def _save_baseline_to_db(self):
         """Persist current baseline model to SQLite."""
@@ -788,8 +880,17 @@ class InferencePipeline:
             self.last_frame_time = time.time()
 
         st = time.time()
+        _stage_times = {}  # Per-stage profiling
+
+        # Jetson thermal/memory protection — skip frame if overloaded
+        if self._jetson_optimizer and self._jetson_optimizer.should_skip_frame():
+            log.debug("Frame skipped by JetsonOptimizer (thermal/memory)")
+            return None
+
         try:
+            _t0 = time.time()
             frame = self.camera.read()
+            _stage_times["camera_read"] = (time.time() - _t0) * 1000.0
             if frame is None:
                 log.warning("Camera read returned None")
                 return None
@@ -822,7 +923,9 @@ class InferencePipeline:
                 except Exception as e:
                     log.debug("Bed detection error: %s", e)
 
+            _t0 = time.time()
             dets = self.det.infer(frame)
+            _stage_times["detection"] = (time.time() - _t0) * 1000.0
             if not dets:
                 log.debug("No person detected — skipping frame")
                 return None
@@ -953,6 +1056,7 @@ class InferencePipeline:
             # pose inference (pose returns normalized / crop coords)
             # TODO-006: Skip pose when no person (already handled by det check above)
             # TODO-008: Cache pose results for static poses
+            _t0 = time.time()
             kps = None
             if self.enable_pose_caching and self.last_cached_pose is not None:
                 # Check if crop is identical using MD5 hash
@@ -982,6 +1086,8 @@ class InferencePipeline:
                     self.last_cached_pose = kps
                     self.last_cached_pose_hash = self._compute_crop_hash(crop)
             
+            _stage_times["pose"] = (time.time() - _t0) * 1000.0
+
             # TODO-060: Keypoint smoothing with SC3D
             if self.keypoint_smoother is None:
                 from pipeline.pose.keypoint_smoother import KeypointSmoother
@@ -1008,6 +1114,7 @@ class InferencePipeline:
             
             # Upgrade to 3D pose if enabled (Phase 2)
             kps_3d = None
+            self_contact_signature = None
             use_3d_pose = self.cfg.get("use_3d_pose_estimation", False)
             if use_3d_pose:
                 try:
@@ -1065,6 +1172,7 @@ class InferencePipeline:
                         kps = kps_smoothed
 
             # Extract features (handcrafted or learned)
+            _t0 = time.time()
             if hasattr(self.feature_encoder, 'extract_features'):
                 # Learned or hybrid feature extractor
                 # TODO-040: Frame buffer management (deque auto-bounds)
@@ -1088,6 +1196,16 @@ class InferencePipeline:
                     # TODO-040: Frame buffer management (deque auto-bounds)
                     self.window.append(feat)  # deque automatically manages size
 
+            _stage_times["features"] = (time.time() - _t0) * 1000.0
+
+            # --- Video2IMU: update converter with keypoints ---
+            imu_signals = None
+            if self._video2imu:
+                try:
+                    imu_signals = self._video2imu.update(kps)
+                except Exception as e:
+                    log.debug("Video2IMU update failed: %s", e)
+
             # --- Patient baseline: update + analyze ---
             baseline_info = None
             if self.baseline_analyzer and feat is not None and not np.isnan(feat).any():
@@ -1108,6 +1226,7 @@ class InferencePipeline:
             self.prev_kps = kps
 
             # Temporal model prediction when enough frames
+            _t0 = time.time()
             label, conf, probs, uncertainty = ("normal", 1.0, [1.0], 0.0)
             if len(self.window) >= max(8, self.temporal.window_size // 4):
                 feat_win = np.stack(self.window[-self.temporal.window_size :])  # (T,F)
@@ -1124,6 +1243,7 @@ class InferencePipeline:
                     label, conf, probs = ("normal", 0.0, [1.0 / len(self.temporal.labels)] * len(self.temporal.labels))
                     log.debug("Temporal model untrained - relying on decision tree")
 
+            _stage_times["temporal"] = (time.time() - _t0) * 1000.0
             inference_ms = (time.time() - st) * 1000.0
 
             # FPS calculation
@@ -1393,10 +1513,10 @@ class InferencePipeline:
                 # Task 4: Clinical correlation (depends on emotion, visibility, movement)
                 # We'll run this after collecting dependent results
 
-                # Collect parallel results with timeout (50ms max wait)
+                # Collect parallel results with timeout (20ms max wait)
                 for task_name, future in futures.items():
                     try:
-                        result = future.result(timeout=0.05)
+                        result = future.result(timeout=0.02)
                         if task_name == "distance":
                             distance_info, distance_feedback = result
                         elif task_name == "emotion":
@@ -1484,6 +1604,7 @@ class InferencePipeline:
                     log.info("BED EXIT detected: %s", alert.get("message"))
 
             # Apply decision engine (blends ML + clinical features)
+            _t0 = time.time()
             try:
                 decision = apply_rules(
                     label, probs, kps,
@@ -1495,6 +1616,40 @@ class InferencePipeline:
             except Exception:
                 log.exception("Decision engine error - falling back to ML label")
                 decision = {"label": label, "confidence": conf, "posture_state": posture_state}
+
+            _stage_times["decision"] = (time.time() - _t0) * 1000.0
+
+            # ── Hourly aggregator: per-frame update ────────────────────
+            if self._hourly_aggregator:
+                try:
+                    # Detect clinical event flags from alerts
+                    _fall_flag = fall_detected
+                    _immobility_flag = any(
+                        a.get("type") == "immobility" for a in clinical_alerts
+                    )
+                    _distress_flag = any(
+                        a.get("type") == "distress" for a in clinical_alerts
+                    )
+
+                    self._hourly_aggregator.update(
+                        posture=posture_state,
+                        support_surface=(
+                            support_surface_info.get("surface_type", "unknown")
+                            if support_surface_info else "unknown"
+                        ),
+                        confidence=posture_confidence,
+                        person_present=True,
+                        activity=activity_state,
+                        clinical_decision=decision,
+                        fall_detected=_fall_flag,
+                        immobility_detected=_immobility_flag,
+                        distress_detected=_distress_flag,
+                        keypoint_visibility=float(
+                            frame_visibility.get("completeness_score", 1.0)
+                        ),
+                    )
+                except Exception as e:
+                    log.debug("Hourly aggregator update failed: %s", e)
 
             # Get segmentation mask if available
             segmentation_mask = None
@@ -1557,8 +1712,10 @@ class InferencePipeline:
                 "frame_visibility": frame_visibility,  # Frame visibility analysis
                 "movement_features": movement_features,  # Motion energy, jerk index
                 "clinical_correlation": clinical_correlation,  # Pain, agitation, dizziness scores
+                "imu_signals": imu_signals,  # Video2IMU acceleration/angular velocity
                 "clinical_alerts": clinical_alerts,  # Bed exit, fall risk, immobility alerts
                 "baseline_info": baseline_info,  # DBSCAN + PCA patient baseline anomaly info
+                "stage_timings": _stage_times,  # Per-stage latency breakdown (ms)
             }
             
             # Add performance metrics if available
@@ -1647,6 +1804,20 @@ class InferencePipeline:
                     self.camera.release()
                     self.display.close()
                     exit(0)
+
+            # Feed stage timings to JetsonOptimizer for bottleneck tracking
+            if self._jetson_optimizer:
+                for stage_name, stage_ms in _stage_times.items():
+                    self._jetson_optimizer.record_inference(stage_ms, stage=stage_name)
+                self._jetson_optimizer.record_inference(inference_ms, stage="total")
+
+            # Log per-stage profiling every 30 frames
+            if not hasattr(self, '_profile_frame_count'):
+                self._profile_frame_count = 0
+            self._profile_frame_count += 1
+            if self._profile_frame_count % 30 == 0:
+                parts = " | ".join(f"{k}={v:.1f}" for k, v in _stage_times.items())
+                log.info("PROFILING [%s] total=%.1fms", parts, inference_ms)
 
             log.debug("FPS: %.2f  Label: %s  Latency: %.1fms", self.fps, result["label"], result["inference_ms"])
             return result

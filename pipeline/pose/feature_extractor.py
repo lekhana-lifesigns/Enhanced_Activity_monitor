@@ -785,7 +785,14 @@ class RunningStandardizer:
 class ICUFeatureEncoder:
     """
     ICU-Grade Agitation Feature Encoder.
-    Transforms raw pose keypoints into 9-dimensional clinical feature vector.
+    Transforms raw pose keypoints into clinical feature vector.
+
+    With graph features enabled (default): 145D = 9D clinical + 136D velocity graph
+    Without graph features: 9D clinical only (legacy mode)
+
+    The 136D velocity graph encodes relative velocity magnitudes between all
+    unique joint pairs (17 choose 2 = 136), capturing spatial coordination
+    patterns that scalar summaries lose (Bsoul 2025).
     """
 
     # Minimum frames for respiratory FFT (>=5 breathing cycles at 6 bpm = 50s)
@@ -796,14 +803,27 @@ class ICUFeatureEncoder:
     # Anything beyond this in a single frame is a detection glitch.
     MAX_KP_JUMP = 0.12
 
-    def __init__(self, window_size=30, fps=15.0, normalize=True, warmup=100):
+    # Number of COCO keypoints
+    NUM_JOINTS = 17
+    # Upper triangle of 17x17 matrix (excluding diagonal)
+    NUM_GRAPH_FEATURES = NUM_JOINTS * (NUM_JOINTS - 1) // 2  # 136
+
+    def __init__(self, window_size=30, fps=15.0, normalize=True, warmup=100,
+                 enable_graph_features=True):
         self.window_size = window_size
         self.fps = fps
+        self.enable_graph_features = enable_graph_features
         self.kps_history = deque(maxlen=window_size)
         self.prev_kps = None
         self.prev_prev_kps = None
         self.prev_velocities = None
-        self.standardizer = RunningStandardizer(n_features=9, warmup=warmup) if normalize else None
+
+        n_features = 9 + self.NUM_GRAPH_FEATURES if enable_graph_features else 9
+        self.feature_dim = n_features
+        self.standardizer = RunningStandardizer(n_features=n_features, warmup=warmup) if normalize else None
+
+        # Precompute upper-triangle pair indices for vectorized graph computation
+        self._pair_i, self._pair_j = np.triu_indices(self.NUM_JOINTS, k=1)
 
         # Dedicated respiratory buffer — much longer than GRU window
         resp_frames = int(self.RESP_BUFFER_SECONDS * fps)
@@ -834,21 +854,62 @@ class ICUFeatureEncoder:
                 cleaned[i] = (self.prev_kps[i][0], self.prev_kps[i][1], kps[i][2])
         return cleaned
     
+    def compute_relative_velocity_graph(self, kps, prev_kps):
+        """
+        Compute relative velocity graph features (Bsoul 2025).
+
+        For each unique joint pair (i, j) where i < j, computes:
+            M(v_relative) = |v_i - v_j| = sqrt((dvx_i - dvx_j)² + (dvy_i - dvy_j)²)
+
+        This captures which joints move together vs independently — critical for
+        distinguishing agitation (bilateral), pain guarding (unilateral), and
+        convulsion (all joints high velocity).
+
+        Returns:
+            np.array of shape (136,) — upper triangle of 17×17 velocity matrix
+        """
+        graph = np.zeros(self.NUM_GRAPH_FEATURES, dtype=np.float32)
+
+        if prev_kps is None or len(kps) < self.NUM_JOINTS or len(prev_kps) < self.NUM_JOINTS:
+            return graph
+
+        dt = 1.0 / self.fps
+
+        # Convert to arrays for vectorized ops
+        kps_arr = np.array(kps[:self.NUM_JOINTS], dtype=np.float32)
+        prev_arr = np.array(prev_kps[:self.NUM_JOINTS], dtype=np.float32)
+
+        # Confidence mask: both frames must have valid keypoints
+        valid = (kps_arr[:, 2] > MIN_CONFIDENCE) & (prev_arr[:, 2] > MIN_CONFIDENCE)
+
+        # Per-joint velocity vectors (17, 2)
+        vel = np.zeros((self.NUM_JOINTS, 2), dtype=np.float32)
+        vel[valid, 0] = (kps_arr[valid, 0] - prev_arr[valid, 0]) / dt
+        vel[valid, 1] = (kps_arr[valid, 1] - prev_arr[valid, 1]) / dt
+
+        # Relative velocity for each pair: |v_i - v_j|
+        # Using precomputed upper-triangle indices (_pair_i, _pair_j)
+        dv = vel[self._pair_i] - vel[self._pair_j]  # (136, 2)
+        magnitudes = np.sqrt(dv[:, 0] ** 2 + dv[:, 1] ** 2)  # (136,)
+
+        # Zero out pairs where either joint has low confidence
+        pair_valid = valid[self._pair_i] & valid[self._pair_j]
+        magnitudes[~pair_valid] = 0.0
+
+        # Clip to prevent outliers from detection glitches
+        graph = np.clip(magnitudes, 0.0, 5.0).astype(np.float32)
+
+        return graph
+
     def extract_feature_vector(self, kps, prev_kps=None, prev_prev_kps=None):
         """
-        Extract ICU-grade clinical feature vector.
-        
+        Extract clinical feature vector.
+
         Returns:
-            np.array of shape (9,) with:
-            [0] motion_energy
-            [1] jerk_index
-            [2] posture_instability (spine angle normalized)
-            [3] sway_score (COM sway)
-            [4] breath_rate_proxy (breaths/min)
-            [5] hand_proximity_risk (0-1)
-            [6] motor_entropy (0-1)
-            [7] symmetry_index (0-1)
-            [8] motion_variability (0-2)
+            If enable_graph_features=True:
+                np.array of shape (145,) — 9D clinical + 136D velocity graph
+            Else:
+                np.array of shape (9,) — 9D clinical only
         """
         if not kps or len(kps) < 5:
             return None
@@ -896,8 +957,8 @@ class ICUFeatureEncoder:
         inter_joint_incoherence = compute_inter_joint_incoherence(list(self.kps_history))
         motion_variability = compute_motion_variability(list(self.kps_history))
         
-        # Build feature vector
-        features = np.array([
+        # Build clinical feature vector (9D)
+        clinical = np.array([
             motion_energy,              # [0] Motion energy
             jerk_index,                 # [1] Jerk index
             posture_instability,         # [2] Posture instability
@@ -908,6 +969,15 @@ class ICUFeatureEncoder:
             symmetry_index,            # [7] Symmetry index
             motion_variability / 2.0,   # [8] Motion variability (normalized 0-1)
         ], dtype=np.float32)
+
+        # Append relative velocity graph features (136D) if enabled
+        if self.enable_graph_features:
+            graph_feats = self.compute_relative_velocity_graph(
+                kps, prev_kps or self.prev_kps
+            )
+            features = np.concatenate([clinical, graph_feats])  # (145,)
+        else:
+            features = clinical  # (9,)
         
         # Update state
         self.prev_prev_kps = self.prev_kps
@@ -926,11 +996,14 @@ class ICUFeatureEncoder:
 # Global encoder instance (for backward compatibility)
 _encoder = None
 
-def get_encoder(window_size=30, fps=15.0):
+def get_encoder(window_size=30, fps=15.0, enable_graph_features=True):
     """Get or create global encoder instance."""
     global _encoder
     if _encoder is None:
-        _encoder = ICUFeatureEncoder(window_size=window_size, fps=fps)
+        _encoder = ICUFeatureEncoder(
+            window_size=window_size, fps=fps,
+            enable_graph_features=enable_graph_features,
+        )
     return _encoder
 
 

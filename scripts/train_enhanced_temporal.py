@@ -282,6 +282,7 @@ def main():
     parser.add_argument("--hidden_dim", type=int, default=64, help="GRU hidden dimension")
     parser.add_argument("--num_heads", type=int, default=2, help="Attention heads")
     parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
+    parser.add_argument("--feature_dim", type=int, default=145, help="Feature dimension (145 with graph features, 9 without)")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, cuda")
     parser.add_argument("--save_dir", default="models/temporal", help="Model save directory")
     args = parser.parse_args()
@@ -295,9 +296,9 @@ def main():
     # Load and split data
     train_files, val_files, test_files = split_files(args.data_dir)
 
-    train_dataset = ActivityDataset(train_files, window_size=48, feature_dim=9)
-    val_dataset = ActivityDataset(val_files, window_size=48, feature_dim=9)
-    test_dataset = ActivityDataset(test_files, window_size=48, feature_dim=9)
+    train_dataset = ActivityDataset(train_files, window_size=48, feature_dim=args.feature_dim)
+    val_dataset = ActivityDataset(val_files, window_size=48, feature_dim=args.feature_dim)
+    test_dataset = ActivityDataset(test_files, window_size=48, feature_dim=args.feature_dim)
 
     if len(train_dataset) == 0:
         log.error("No valid training samples found. Collect data first with collect_training_data: true")
@@ -313,7 +314,7 @@ def main():
 
     # Create optimized model
     model = OptimizedTemporalModel(
-        input_dim=9,
+        input_dim=args.feature_dim,
         hidden_dim=args.hidden_dim,
         num_classes=6,
         num_heads=args.num_heads,

@@ -6,6 +6,7 @@ device_id: "bed_01"
 camera_idx: 0
 camera_resolution: [1280, 720]
 camera_fps: 15
+camera_url: null  # RTSP/IP camera URL (overrides camera_idx). Example: "rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 
 # Service ports (can be overridden via CLI arguments)
 dashboard_port: 5000  # Clinical Dashboard web interface port
@@ -27,7 +28,7 @@ motion_sensitivity: 5
 enable_display: true
 
 use_edgetpu: false
-device: "cuda"  # Options: "cpu", "cuda" (for Jetson/GPU), "mps" (for Apple Silicon). Set to "cuda" for Jetson Orin.
+device: "cuda"  # Options: "cpu", "cuda" (for Jetson/GPU), "mps" (for Apple Silicon). Auto-falls back to CPU if CUDA unavailable.
 
 # Jetson CSI camera settings (set use_gstreamer: true for CSI cameras, false for USB)
 use_gstreamer: false  # Enable GStreamer pipeline for Jetson CSI cameras (nvarguscamerasrc)
@@ -89,8 +90,10 @@ emotion_method: "deepface"  # "deepface" (accurate), "mediapipe" (fast), or "geo
 # Enhanced Model Settings
 use_enhanced_temporal: true  # Use enhanced temporal model with attention
 temporal_use_fp16: true  # Enable FP16 inference for temporal model (GPU only, saves memory). Enabled for Jetson Orin.
-temporal_hidden_dim: 64  # GRU hidden dimension (64=34K params, 96=75K params)
-temporal_num_heads: 2  # Attention heads (2 sufficient for 9D features)
+temporal_hidden_dim: 64  # GRU hidden dimension (64=60K params with 145D, 96=105K params)
+temporal_num_heads: 2  # Attention heads (2 sufficient for feature dimensions)
+enable_graph_features: true  # Enable 136D relative velocity graph features (Bsoul 2025). Total: 9D clinical + 136D graph = 145D
+feature_dim: 145  # Total feature dimension (9 clinical + 136 graph). Set to 9 if enable_graph_features is false
 use_3d_pose_estimation: true  # Upgrade 2D pose to 3D for better accuracy
 pose3d_method: "kinematic"  # "kinematic" (forward kinematics), "geometric" (fast, basic)
 use_bone_constraints: true  # Enforce bone-length constraints for anatomically valid poses
@@ -205,6 +208,16 @@ activity_classification_frequency: 1  # Run activity classification every N fram
 # Pose Caching (TODO-008)
 enable_pose_caching: true  # Cache pose results for static poses (20-30% faster for static scenes)
 pose_cache_threshold: 0.03  # Pose change threshold for cache invalidation (0-1), lower = more aggressive caching
+
+# Training Data Collection (for GRU temporal model training)
+# Enable to collect labeled feature windows from decision tree + activity classifier
+# Train with: python scripts/train_enhanced_temporal.py --data_dir data/training_collection
+collect_training_data: true  # Enable automatic training data collection
+training_data_dir: "data/training_collection"  # Directory for .npz training samples
+training_min_confidence: 0.7  # Minimum classifier confidence to save a sample
+
+# Jetson GPU Optimization
+enable_jetson_optimizer: true  # Enable adaptive GPU optimization (thermal management, dynamic precision)
 
 log_level: DEBUG  # Change to INFO for production (DEBUG shows frame-by-frame details)
 heartbeat_interval: 5
